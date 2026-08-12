@@ -18,6 +18,16 @@ Design details: [docs/MATCHING_ALGORITHM.md](docs/MATCHING_ALGORITHM.md).
 Scaffolding stage — see [TASKS.md](TASKS.md) for the build backlog and
 what's done so far.
 
+## Dispatch demo (separate side module)
+
+`backend/app/dispatch/` is a smaller, self-contained module that solves a
+different, more familiar problem: matching one rider to the nearest
+*available driver* in a fixed fleet (haversine distance, not the
+rider-to-rider pooling this project is really about). It's a warm-up
+slice, not a replacement for the pooling engine above — see its own
+[README](backend/app/dispatch/README.md) for exactly what it does and
+doesn't do.
+
 ## Running locally
 
 ```bash
