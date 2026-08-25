@@ -15,9 +15,10 @@ RideRequest
 ```
 
 Real WhatsApp messages are unstructured ("leaving IAD 9ish need 2 seats to
-Fairfax"). Parsing that into this schema is its own small NLP/regex task —
-tracked separately in TASKS.md, kept decoupled from the matching core so the
-engine can be developed and tested against clean structured data first.
+Fairfax") and, per real examples reviewed, often missing fields entirely
+("Need ride"). Rather than parse that, intake is a structured web form
+(TASKS.md #6) that asks for these fields directly — no NLP/regex layer, and
+the matching core only ever sees clean structured data.
 
 ## Why this isn't "just a database query"
 
