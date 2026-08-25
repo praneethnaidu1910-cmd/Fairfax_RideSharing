@@ -29,16 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 2. Spatial bucketing
-- Implement H3-based bucketing in `backend/app/matching/bucketing.py`
-  (use the `h3` package). The H3 cell (resolution ~8) is also what gets
-  shown to other users as the "coarse area" for a request pre-match —
-  one index serves both candidate-reduction and privacy, don't build two.
-- **Acceptance**: given the sample dataset, bucketing returns candidate
-  groups that visibly exclude far-apart / opposite-direction requests.
-  Test with a fixture pair that should NOT match (e.g. opposite commute
-  directions) and assert it's excluded.
-
 ### 3. Compatibility scoring
 - Implement scoring functions (spatial, directional, temporal, capacity)
   per docs/MATCHING_ALGORITHM.md, in `backend/app/matching/scoring.py`.
@@ -115,6 +105,25 @@ section. Don't pull them forward without an explicit scope conversation.
   bucketing tests.
 - Excluding `contact` from pre-match API responses is left to task 6
   (response-shaping), per that task's own acceptance criteria.
+
+### 2. Spatial bucketing (`66bdb57736584d7cfe3e6c2b394490ad5031558e`)
+- `app/matching/bucketing.py` builds origin/destination H3 cell indexes
+  once (`build_indexes()`) and reuses them for every candidate lookup
+  (`candidates_for()` / `candidate_groups()`), so this stays a
+  hash-bucket lookup rather than an all-pairs scan. Reuses
+  `Location.coarse_cell()` from task 1 -- same H3 index, no second
+  geocoding scheme.
+- A request is a candidate only if its origin cell AND destination cell
+  are both within one hex ring (`NEIGHBOR_RING = 1`) of the query
+  request's -- same-or-adjacent, "close enough to share a pickup."
+- rider-1 (Fairfax->Aldie) / rider-2 (Aldie->Fairfax) in the sample
+  dataset are the opposite-direction fixture: same two towns, opposite
+  order, ~15mi apart on each leg, so their origin (and destination)
+  cells aren't neighbors and bucketing excludes the pair -- tested in
+  `tests/test_bucketing.py`. True same-corridor opposite-direction
+  false positives (close origins, opposite bearing) are task 3's
+  directional-scoring job, not bucketing's -- bucketing only prunes on
+  distance.
 
 _(the dispatch side-module is a separate, already-complete slice; see
 backend/app/dispatch/README.md)_
