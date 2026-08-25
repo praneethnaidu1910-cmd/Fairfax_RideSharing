@@ -12,16 +12,16 @@ scheduled agent):
   and leave a note under the task instead of pushing through scope creep.
 - Move a finished task to the "Done" section at the bottom with the commit
   hash, so the log doubles as a changelog.
-- **Automated runs are deliberately capped at a small number of commits per
-  invocation** — this is for real learning pace, not just throughput: the
-  morning run makes at most 2 commits, the evening run at most 1, so each
-  day's diff stays small enough to actually review. Stop at the cap even
-  if more work is cleanly ready; pick it up next run. This is a hard
-  ceiling, not a target to hit regardless of readiness — 0 or 1 commits in
-  a run because nothing else was safely done yet is correct behavior, not
+- **I'm deliberately capping automated runs to a small number of commits
+  per invocation** — I want to actually learn from this, not just watch
+  code appear, so the morning run makes at most 2 commits and the evening
+  run at most 1. Small enough that I can read the whole diff. Stop at the
+  cap even if more work is cleanly ready; pick it up next run. This is a
+  hard ceiling, not a target to hit regardless of readiness — 0 or 1
+  commits in a run because nothing else was safely done yet is fine, not
   a shortfall.
-- Merging `nightly` into `main` is the owner's call, not the automated
-  run's — never do it as part of a scheduled run.
+- I merge `nightly` into `main` myself, by hand, after I've reviewed it —
+  automated runs never do this.
 
 Phase 2 items (multi-region, payments, SMS/OTP identity, moderation
 tooling) are intentionally not listed here — see SCOPE.md's "Phase 2"
