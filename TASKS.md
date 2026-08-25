@@ -29,37 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 1. Data models + sample dataset
-- `RideRequest` in `backend/app/schemas.py` needs to cover what Phase 1
-  actually requires, not just the original one-off case:
-  - `origin` / `destination`: keep precise `Location{lat, lng}` internally,
-    but add a `coarse_location()`-style way to derive a neighborhood-level
-    area from it (this can reuse the H3 cell from task 2 once it exists —
-    don't build a second geocoding scheme).
-  - `schedule`: either a one-off `{earliest_departure, latest_departure}`
-    window (existing) or a `recurring` pattern (set of weekdays + a time
-    window) — a request is one or the other, not both.
-  - `seats_needed`: already covers party size (a friend posting for a
-    group of 3 is just `seats_needed=3`); no separate party/group model
-    needed.
-  - `status`: `open | matched | expired`.
-  - `contact`: collected at request time (e.g. phone number), but must
-    never appear in any serialized response until the request is matched
-    — this is a response-shaping concern (task 6), not a schema-only one,
-    but flag the field here so it isn't bolted on later.
-- Update `backend/app/sample_data.py`: synthetic requests that exercise
-  both one-off and recurring patterns, and both stranger and
-  friend-group (`seats_needed > 1`) cases, modeled on the real message
-  patterns already reviewed (invented data, not the literal real
-  messages — no real phone numbers or addresses, ever, per the existing
-  rule below).
-- **Acceptance**: `pytest backend/tests/test_schemas.py` passes; sample
-  data loads and validates against the schema; one test asserts a
-  recurring request and a one-off request both validate; one test
-  asserts `contact` is present on the model but a separate serialization
-  test (can live here or in task 6) proves it's excluded from a
-  pre-match API response.
-
 ### 2. Spatial bucketing
 - Implement H3-based bucketing in `backend/app/matching/bucketing.py`
   (use the `h3` package). The H3 cell (resolution ~8) is also what gets
@@ -134,5 +103,18 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Done
 
-_(nothing yet on this track — the dispatch side-module is a separate,
-already-complete slice; see backend/app/dispatch/README.md)_
+### 1. Data models + sample dataset (`1329205300f1b225c1393eb17fbc848dca0e1861`)
+- `RideRequest` now has a `schedule: OneOffSchedule | RecurringSchedule`
+  union (one or the other, never both), `status` (open/matched/expired,
+  default open), and a required `contact` field. `Location.coarse_cell()`
+  wraps a shared `app/geo.py` H3 helper (resolution 8) so task 2's
+  bucketing reuses the same index rather than a second geocoding scheme.
+- `app/sample_data.py` seeds 10 invented requests across SCOPE.md's named
+  towns, covering one-off/recurring and stranger/group combinations, plus
+  an opposite-direction pair and a close-origin pair for task 2's
+  bucketing tests.
+- Excluding `contact` from pre-match API responses is left to task 6
+  (response-shaping), per that task's own acceptance criteria.
+
+_(the dispatch side-module is a separate, already-complete slice; see
+backend/app/dispatch/README.md)_
