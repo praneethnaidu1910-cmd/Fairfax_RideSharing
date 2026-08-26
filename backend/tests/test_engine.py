@@ -1,5 +1,10 @@
+import asyncio
+import contextlib
 from datetime import datetime, timedelta
 
+import pytest
+
+from app.matching import engine as engine_module
 from app.matching.engine import DEFAULT_VEHICLE_CAPACITY, MatchingEngine
 from app.sample_data import SAMPLE_REQUESTS
 from app.schemas import Location, OneOffSchedule, RequestStatus, RideRequest
@@ -81,3 +86,86 @@ def test_match_batch_excludes_opposite_direction_pair():
     assert matches == []
     assert request_a.status == RequestStatus.OPEN
     assert request_b.status == RequestStatus.OPEN
+
+
+def test_on_new_request_matches_close_pair_scoring_only_bucketed_candidates(monkeypatch):
+    # Seed a pool of several requests, most nowhere near rider-7's corridor
+    # -- bucketing should keep on_new_request from scoring against most of
+    # them, which this asserts on the compatibility_score call count, not
+    # just the match outcome (TASKS.md #5's own acceptance wording).
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    for rider_id in ("rider-1", "rider-3", "rider-4", "rider-6", "rider-9"):
+        engine._unmatched.append(by_rider[rider_id])
+
+    call_count = 0
+    original_score = engine_module.compatibility_score
+
+    def counting_score(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_score(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "compatibility_score", counting_score)
+
+    matches = engine.on_new_request(by_rider["rider-7"])
+
+    assert len(matches) == 1
+    assert set(matches[0].request_ids) == {by_rider["rider-7"].id, by_rider["rider-1"].id}
+    # Only rider-1 shares rider-7's H3 neighborhood on both ends: scoring
+    # ran once, not once per request in the 5-request pool.
+    assert call_count == 1
+    assert by_rider["rider-1"] not in engine._unmatched
+    assert len(engine._unmatched) == 4
+
+
+def test_on_new_request_joins_pool_when_no_candidate_matches():
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+
+    matches = engine.on_new_request(by_rider["rider-6"])  # Manassas -> Sterling, alone
+
+    assert matches == []
+    assert by_rider["rider-6"] in engine._unmatched
+    assert by_rider["rider-6"].status == RequestStatus.OPEN
+
+
+def test_on_new_request_matches_across_two_sequential_arrivals():
+    # Requests trickling in one at a time (docs/MATCHING_ALGORITHM.md's
+    # real-time model): the first has nothing to match yet, the second
+    # closes the loop.
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+
+    first_matches = engine.on_new_request(by_rider["rider-1"])
+    assert first_matches == []
+    assert by_rider["rider-1"].status == RequestStatus.OPEN
+
+    second_matches = engine.on_new_request(by_rider["rider-7"])
+    assert len(second_matches) == 1
+    assert set(second_matches[0].request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}
+    assert by_rider["rider-1"].status == RequestStatus.MATCHED
+    assert by_rider["rider-7"].status == RequestStatus.MATCHED
+    assert engine._unmatched == []
+
+
+@pytest.mark.asyncio
+async def test_run_forever_publishes_match_for_two_submitted_requests():
+    # The asyncio.Queue-backed pipeline: submit() feeds `incoming`,
+    # run_forever() drains it via on_new_request() and publishes matches
+    # to `matches` -- the consumer side TASKS.md #6 wires a WebSocket to.
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+
+    worker = asyncio.create_task(engine.run_forever())
+    await engine.submit(by_rider["rider-1"])
+    await engine.submit(by_rider["rider-7"])
+    await engine.incoming.join()
+
+    worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await worker
+
+    assert engine.matches.qsize() == 1
+    match = engine.matches.get_nowait()
+    assert set(match.request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}

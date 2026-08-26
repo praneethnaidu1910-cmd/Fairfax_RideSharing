@@ -29,13 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 5. Incremental matching + in-process pub/sub
-- Add `MatchingEngine.on_new_request()` for incremental (not full-recompute)
-  matching, backed by an `asyncio.Queue`.
-- **Acceptance**: test simulates requests arriving one at a time and
-  asserts matches appear without re-scoring the entire dataset each time
-  (assert on call counts, not just output).
-
 ### 6. Structured intake + privacy-safe read API
 - `POST /requests`: accepts the structured form fields (task 1), not raw
   text — this replaces what would otherwise be a WhatsApp-message-parsing
@@ -141,6 +134,28 @@ section. Don't pull them forward without an explicit scope conversation.
   bucketing stage and wouldn't exercise this cutoff.
 - A successful match flips both requests' `status` to `matched` in place;
   everything else stays `open` (verified against the full sample dataset).
+
+### 5. Incremental matching + in-process pub/sub (`7f8cb1f`)
+- `MatchingEngine.on_new_request()` is match_batch()'s incremental sibling:
+  it builds bucketing indexes over just `self._unmatched` (the running
+  pool, not every open request) and scores `request` only against its own
+  H3 neighborhood within that pool -- "re-run bucketing/scoring only
+  against relevant existing unmatched requests," per
+  docs/MATCHING_ALGORITHM.md. A match flips both requests' `status` and
+  drops the matched candidate from the pool; a non-match adds `request` to
+  the pool for the next call. Returns a list of zero or one `MatchGroup`
+  (a new request matches at most one existing one) so it keeps
+  match_batch()'s return shape.
+- Added `submit()`/`run_forever()`, an `asyncio.Queue`-backed pipeline
+  (`incoming` in, `matches` out) around `on_new_request()` -- the
+  real-time entry/exit points TASKS.md #6's WebSocket and #8's simulator
+  will plug into, so neither has to build its own queue wiring.
+- Tested with a monkeypatched `compatibility_score` call counter (per this
+  task's own acceptance wording: assert on call counts, not just output)
+  proving a 5-request pool only gets scored once, not five times, when
+  just one request shares the new request's bucket; a two-arrivals test
+  (`on_new_request` called twice, matching on the second call); and an
+  `asyncio`-driven test exercising `submit()`/`run_forever()` end to end.
 
 _(the dispatch side-module is a separate, already-complete slice; see
 backend/app/dispatch/README.md)_
