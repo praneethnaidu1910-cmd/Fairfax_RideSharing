@@ -29,18 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 4. Greedy matching engine
-- Implement `MatchingEngine.match_batch()` in
-  `backend/app/matching/engine.py` using bucketing + scoring + greedy
-  assignment.
-- A successful match flips both requests' `status` to `matched` (task 1's
-  field) — this is the only place `status` transitions away from `open`
-  in a batch run.
-- **Acceptance**: running the full sample dataset through the engine
-  produces a matches list with no capacity violations and no
-  opposite-direction false matches; test asserts both, plus asserts
-  matched requests' `status` updates correctly.
-
 ### 5. Incremental matching + in-process pub/sub
 - Add `MatchingEngine.on_new_request()` for incremental (not full-recompute)
   matching, backed by an `asyncio.Queue`.
@@ -130,6 +118,29 @@ section. Don't pull them forward without an explicit scope conversation.
 - rider-1/rider-7 (close origin, same Aldie destination, overlapping
   window) score higher via `compatibility_score()` than rider-1/rider-2
   (opposite direction) -- the known-good-vs-known-bad acceptance test.
+
+### 4. Greedy matching engine (`10a92dd`)
+- `app/matching/engine.py`'s `MatchingEngine.match_batch()` scores every
+  bucketed candidate pair once (bucketing #2 + scoring #3), sorts
+  descending, and assigns greedily with no backtracking, per the design
+  doc's baseline. Only produces pairs -- `MatchGroup`s of size >2 are the
+  doc's explicit "upgrade, if time allows" phase, not built here.
+- `DEFAULT_VEHICLE_CAPACITY = 4` is a new named constant standing in for
+  "how many people can realistically share one car" -- there's no
+  separate driver/vehicle entity in rider-to-rider pooling (that's the
+  unrelated dispatch module), so this is my own reasonable default rather
+  than something SCOPE.md specifies; worth revisiting if real usage shows
+  a different typical party size.
+- Added a directional hard cutoff (`MIN_DIRECTIONAL_SCORE = 0.5`,
+  alongside `capacity_fits()`) because the weighted `compatibility_score`
+  alone wasn't enough to reject a same-cell, opposite-direction pair --
+  perfect spatial/temporal scores could otherwise outweigh a directional
+  score of 0. Tested with a synthetic close-points-reversed-direction
+  fixture in `test_engine.py`, since the sample dataset's real
+  opposite-direction pair (rider-1/rider-2) is already excluded at the
+  bucketing stage and wouldn't exercise this cutoff.
+- A successful match flips both requests' `status` to `matched` in place;
+  everything else stays `open` (verified against the full sample dataset).
 
 _(the dispatch side-module is a separate, already-complete slice; see
 backend/app/dispatch/README.md)_
