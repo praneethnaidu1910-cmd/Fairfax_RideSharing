@@ -29,18 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 3. Compatibility scoring
-- Implement scoring functions (spatial, directional, temporal, capacity)
-  per docs/MATCHING_ALGORITHM.md, in `backend/app/matching/scoring.py`.
-- Recurring requests get expanded to concrete one-off instances (e.g. a
-  "weekdays at 9am" request becomes 5 candidate instances for the current
-  week) before scoring — scoring itself should only ever see one-off time
-  windows, so this stays a pre-processing step, not new scoring logic.
-- **Acceptance**: unit tests for each scoring dimension independently,
-  plus one test asserting a known-good pair scores higher than a
-  known-bad pair, plus one test proving a recurring request expands to
-  the expected number of instances and each scores independently.
-
 ### 4. Greedy matching engine
 - Implement `MatchingEngine.match_batch()` in
   `backend/app/matching/engine.py` using bucketing + scoring + greedy
@@ -124,6 +112,24 @@ section. Don't pull them forward without an explicit scope conversation.
   false positives (close origins, opposite bearing) are task 3's
   directional-scoring job, not bucketing's -- bucketing only prunes on
   distance.
+
+### 3. Compatibility scoring (`cbc6655c5d03e476bad0f70a7154733f9692ef28`)
+- `app/matching/scoring.py` implements the four dimensions from
+  docs/MATCHING_ALGORITHM.md: `spatial_score()` and `directional_score()`
+  (haversine distance + bearing cosine similarity, both new in
+  `app/geo.py` so the pooling engine has its own copy rather than reaching
+  into the separate dispatch module's), `temporal_score()` (window overlap
+  normalized by the shorter window), and `capacity_fits()` as a hard
+  boolean constraint kept out of the weighted sum, per the doc. Weights
+  (`WEIGHT_SPATIAL`/`WEIGHT_DIRECTIONAL`/`WEIGHT_TEMPORAL`) are named
+  module constants, not magic numbers.
+- `expand_schedule()` is the recurring -> one-off pre-processing step: a
+  `RecurringSchedule` becomes one `OneOffSchedule` per weekday in the
+  current Monday-Sunday week, so `temporal_score()`/`compatibility_score()`
+  only ever see one-off windows, never a recurring pattern directly.
+- rider-1/rider-7 (close origin, same Aldie destination, overlapping
+  window) score higher via `compatibility_score()` than rider-1/rider-2
+  (opposite direction) -- the known-good-vs-known-bad acceptance test.
 
 _(the dispatch side-module is a separate, already-complete slice; see
 backend/app/dispatch/README.md)_
