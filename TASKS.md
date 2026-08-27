@@ -29,20 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 6. Structured intake + privacy-safe read API
-- `POST /requests`: accepts the structured form fields (task 1), not raw
-  text — this replaces what would otherwise be a WhatsApp-message-parsing
-  task; there isn't one, by design.
-- `GET /requests`: returns open requests with **coarse location + fuzzed
-  time only** — this is the response-shaping step flagged in task 1.
-  Write a test that posts a request with a precise address-level
-  location and asserts the precise value never appears in this
-  endpoint's response.
-- `WS /matches`: streams match events, wired to the engine from task 5.
-- **Acceptance**: automated tests using FastAPI's `TestClient` for both
-  HTTP routes, including the privacy-shaping test above; manual
-  curl/websocket smoke test documented in README.
-
 ### 7. Post-match reveal
 - Once two requests are matched, both parties' precise location and
   `contact` become visible **to each other only** (e.g. `GET
@@ -156,6 +142,45 @@ section. Don't pull them forward without an explicit scope conversation.
   just one request shares the new request's bucket; a two-arrivals test
   (`on_new_request` called twice, matching on the second call); and an
   `asyncio`-driven test exercising `submit()`/`run_forever()` end to end.
+
+### 6. Structured intake + privacy-safe read API (`4e645ef`)
+- `app/router.py` adds `POST /requests` (structured `RideRequestCreate`
+  body, no free text -- task 1's form fields directly) and `GET /requests`
+  (coarse area + fuzzed window only). `WS /matches` streams each
+  `MatchGroup` as the engine finds it.
+- `POST /requests` doesn't match inline -- it stores the request in a new
+  `app/store.py` `RequestStore` (all requests, any status; separate from
+  `MatchingEngine._unmatched`, which drops a request the moment it's no
+  longer relevant to bucketing) and `await`s `engine.submit()`, letting
+  task 5's `run_forever()` pipeline do the actual matching in the
+  background -- now actually started, as a FastAPI lifespan task in
+  `app/main.py`, which is what that function's own docstring said task 6
+  should do.
+- `engine`/`store` live on `app.state`, set up fresh in the lifespan, not
+  as module-level singletons -- so every `with TestClient(app) as
+  client:` block in a test gets its own empty pool instead of leaking
+  matched requests into the next test.
+- `app/privacy.py`'s `to_public()` is the one place a full `RideRequest`
+  becomes the coarse/fuzzed `RideRequestPublic` shape: `Location.coarse_cell()`
+  (task 1) for both origin and destination instead of lat/lng, and
+  `fuzz_schedule()` widens the departure window by 15 minutes on each
+  side (`FUZZ_PADDING`) so the fuzzed window never reveals the real one
+  even when the posted window is already narrow. `contact` never appears
+  in this path at all.
+- `WS /matches` reads directly off `engine.matches`, so with more than one
+  connection open, matches split competing-consumer style instead of
+  broadcasting to every subscriber -- fine for a single subscriber (task
+  8's simulator/live view); real fan-out would need a per-connection
+  queue, not worth building before something needs it.
+- Tests (`tests/test_requests_api.py`) cover: the privacy-shaping
+  acceptance criterion itself (a precise-location, real-contact request
+  posted, then asserted absent from both the `POST` response and `GET
+  /requests`, by key and by substring); the fuzzed window actually being
+  wider than the one posted; and a `TestClient` websocket test proving a
+  same-corridor pair (mirroring the sample dataset's rider-1/rider-7
+  fixture) shows up as a match event on `/matches` after two `POST`s, not
+  just in the return value of some function. Manual curl/websocket smoke
+  test documented in the root README.
 
 _(the dispatch side-module is a separate, already-complete slice; see
 backend/app/dispatch/README.md)_

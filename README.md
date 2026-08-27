@@ -40,3 +40,49 @@ uvicorn app.main:app --reload
 cd backend
 pytest
 ```
+
+## Manual smoke test: structured intake + live matches
+
+With the server running (`uvicorn app.main:app --reload` from `backend/`),
+open a WebSocket subscriber first so you can watch a match arrive, then post
+two compatible requests from another terminal.
+
+```bash
+# Terminal 1 -- subscribe to match events (websocat, or any WS client)
+websocat ws://127.0.0.1:8000/matches
+```
+
+```bash
+# Terminal 2 -- two riders on the same Fairfax->Aldie corridor, overlapping
+# windows, close-but-not-identical origins
+curl -X POST http://127.0.0.1:8000/requests \
+  -H "Content-Type: application/json" \
+  -d '{
+        "rider_id": "rider-a",
+        "origin": {"lat": 38.8462, "lng": -77.3064},
+        "destination": {"lat": 38.9757, "lng": -77.6122},
+        "schedule": {"earliest_departure": "2026-01-01T14:00:00", "latest_departure": "2026-01-01T14:30:00"},
+        "seats_needed": 1,
+        "contact": "555-0101"
+      }'
+
+curl -X POST http://127.0.0.1:8000/requests \
+  -H "Content-Type: application/json" \
+  -d '{
+        "rider_id": "rider-b",
+        "origin": {"lat": 38.8500, "lng": -77.3100},
+        "destination": {"lat": 38.9757, "lng": -77.6122},
+        "schedule": {"earliest_departure": "2026-01-01T14:05:00", "latest_departure": "2026-01-01T14:35:00"},
+        "seats_needed": 1,
+        "contact": "555-0102"
+      }'
+
+# Should show both requests, coarse area + fuzzed window only -- no
+# origin/destination lat-lng and no contact field.
+curl http://127.0.0.1:8000/requests
+```
+
+Terminal 1 should print a `MatchGroup` event (both request ids, a score, and
+a reason) shortly after the second `POST` -- that's the incremental matching
+engine (TASKS.md #5) picking it up off the real-time pipeline, not a
+database poll.

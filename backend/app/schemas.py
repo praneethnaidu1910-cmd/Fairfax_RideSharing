@@ -72,3 +72,33 @@ class MatchGroup(BaseModel):
     request_ids: list[UUID]
     score: float
     reason: str
+
+
+class RideRequestCreate(BaseModel):
+    """POST /requests body -- the structured intake form's fields (SCOPE.md:
+    a web form, not free text). Excludes id/status/posted_at, which
+    RideRequest assigns itself, so a client can't hand a request in as
+    already `matched`."""
+
+    rider_id: str
+    origin: Location
+    destination: Location
+    schedule: Union[OneOffSchedule, RecurringSchedule]
+    seats_needed: int = Field(default=1, ge=1)
+    contact: str
+
+
+class RideRequestPublic(BaseModel):
+    """GET /requests shape -- coarse location + fuzzed time only, never the
+    precise Location or `contact` (SCOPE.md: "no exact address, ever,
+    pre-match"). Built by app/privacy.py's to_public(), not a method here,
+    so this module doesn't need app.geo's fuzzing helpers."""
+
+    id: UUID
+    rider_id: str
+    origin_area: str
+    destination_area: str
+    schedule: Union[OneOffSchedule, RecurringSchedule]
+    seats_needed: int
+    status: RequestStatus
+    posted_at: datetime
