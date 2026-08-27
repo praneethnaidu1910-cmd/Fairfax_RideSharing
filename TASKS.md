@@ -29,14 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 8. Simulator + minimal live view
-- Script that replays the sample dataset with realistic (compressed)
-  timing against the running API; a barebones page or CLI subscriber
-  that prints matches as they arrive.
-- **Acceptance**: running `python backend/simulate.py` against a running
-  server produces visible match events during the run, not just at the
-  end.
-
 ## Done
 
 ### 1. Data models + sample dataset (`1329205300f1b225c1393eb17fbc848dca0e1861`)
@@ -197,4 +189,33 @@ section. Don't pull them forward without an explicit scope conversation.
   the redacted view, an unmatched request's own `GET` is redacted too, and
   an unknown id 404s.
 
-### 8. Simulator + minimal live view
+### 8. Simulator + minimal live view (`8188ce5`)
+- `backend/simulate.py` replays `app/sample_data.py`'s `SAMPLE_REQUESTS`
+  against a *running* server (`POST /requests`, staggered across a
+  compressed `--seconds` window, default 15s) while a second `asyncio`
+  task subscribes to `WS /matches` the whole time and prints each match as
+  it arrives -- interleaved with the posts, not batched at the end, which
+  is the acceptance criterion itself and the actual point: proving
+  task 5's incremental pipeline is real-time, not a batch job wearing a
+  websocket.
+- The two tasks are coordinated with an `asyncio.Event` the subscriber
+  sets once its websocket is actually connected, so the publisher never
+  starts posting before there's a subscriber to miss an early match (the
+  matches queue wouldn't lose it either way -- `WS /matches` reads off
+  `engine.matches`, a queue, so a match posted before any subscriber
+  connects just waits there -- but connecting first makes the run's timing
+  honest instead of accidental). Racing that same event against the
+  subscriber task's own completion (via `asyncio.wait(...,
+  return_when=FIRST_COMPLETED)`) is what turns "server isn't running" into
+  an immediate, readable error instead of hanging forever waiting for a
+  websocket that's never going to connect -- caught this the hard way
+  running it against a killed server before writing the fix.
+- Manually verified against a live `uvicorn` instance (not something
+  `pytest` covers, since the acceptance criterion is about a running
+  process's interleaved output, not a return value): `rider-7`'s POST at
+  ~4.1s produces a `MATCH rider-7 <-> rider-1` line at that same ~4.1s
+  mark, three full posts (rider-8/9/10) before the run even finishes --
+  see the root README's new "Simulator" section for the command.
+- Added `websockets` to `requirements.txt` as a direct dependency, since
+  `simulate.py` imports it directly rather than relying on it coming along
+  transitively through `uvicorn[standard]`.

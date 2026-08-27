@@ -41,11 +41,23 @@ cd backend
 pytest
 ```
 
-## Manual smoke test: structured intake + live matches
+## Simulator: watch the sample dataset match in real time
 
 With the server running (`uvicorn app.main:app --reload` from `backend/`),
-open a WebSocket subscriber first so you can watch a match arrive, then post
-two compatible requests from another terminal.
+replay the full sample dataset against it with staggered, compressed timing
+and watch match events print as they're found, not just at the end:
+
+```bash
+python backend/simulate.py
+```
+
+## Manual smoke test: structured intake + live matches
+
+The simulator above is the automated version of this; the walkthrough below
+is the same thing done by hand, one request at a time, if you want to see
+each step. With the server running (`uvicorn app.main:app --reload` from
+`backend/`), open a WebSocket subscriber first so you can watch a match
+arrive, then post two compatible requests from another terminal.
 
 ```bash
 # Terminal 1 -- subscribe to match events (websocat, or any WS client)

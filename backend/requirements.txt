@@ -6,3 +6,4 @@ scipy
 pytest
 pytest-asyncio
 httpx
+websockets
