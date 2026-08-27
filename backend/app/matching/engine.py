@@ -97,6 +97,8 @@ class MatchingEngine:
             matched_ids.add(b_id)
             by_id[a_id].status = RequestStatus.MATCHED
             by_id[b_id].status = RequestStatus.MATCHED
+            by_id[a_id].matched_with = b_id
+            by_id[b_id].matched_with = a_id
             matches.append(
                 MatchGroup(
                     request_ids=[a_id, b_id],
@@ -150,6 +152,8 @@ class MatchingEngine:
 
         request.status = RequestStatus.MATCHED
         best_candidate.status = RequestStatus.MATCHED
+        request.matched_with = best_candidate.id
+        best_candidate.matched_with = request.id
         self._unmatched.remove(best_candidate)
         return [
             MatchGroup(

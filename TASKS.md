@@ -29,15 +29,6 @@ section. Don't pull them forward without an explicit scope conversation.
 
 ## Up next
 
-### 7. Post-match reveal
-- Once two requests are matched, both parties' precise location and
-  `contact` become visible **to each other only** (e.g. `GET
-  /requests/{id}` returns precise/contact fields when the requester is
-  the matched counterpart, coarse/redacted otherwise).
-- **Acceptance**: test asserts a non-matched caller gets the redacted
-  view and the matched counterpart gets the full view of the same
-  request.
-
 ### 8. Simulator + minimal live view
 - Script that replays the sample dataset with realistic (compressed)
   timing against the running API; a barebones page or CLI subscriber
@@ -182,5 +173,28 @@ section. Don't pull them forward without an explicit scope conversation.
   just in the return value of some function. Manual curl/websocket smoke
   test documented in the root README.
 
-_(the dispatch side-module is a separate, already-complete slice; see
-backend/app/dispatch/README.md)_
+### 7. Post-match reveal (`0258de7`)
+- `RideRequest` gets a new `matched_with: Optional[UUID]` field, set by
+  `MatchingEngine` (both `match_batch()` and `on_new_request()`) right
+  alongside the existing `status = MATCHED` flip -- so a matched pair's
+  linkage lives on the request objects themselves, the same objects
+  `RequestStore` already holds, with no new plumbing needed to get it from
+  engine to store.
+- `GET /requests/{request_id}` (`app/router.py`) returns the coarse/fuzzed
+  `to_public()` view (task 6) to anyone, *except* when the caller passes
+  `viewer_request_id` equal to that request's `matched_with`, in which
+  case it returns the full `RideRequest` (precise `Location` + `contact`).
+- There's no login/session system (SCOPE.md: no SMS/OTP for the MVP), so
+  `viewer_request_id` -- the caller's own request id, handed back by
+  `POST /requests` and never shown to anyone else -- is standing in as
+  the one proof of "I'm the matched counterpart." Same open, no-membership
+  trust model SCOPE.md already accepts for contact exchange itself,
+  applied one step earlier to who gets to ask; noting this here in case
+  a real auth story ever needs to replace it.
+- Tests (`tests/test_requests_api.py`): the matched counterpart's request
+  gets the full view (real `contact`, real `origin`), a random/absent/
+  even the *same* request's own id as `viewer_request_id` all still get
+  the redacted view, an unmatched request's own `GET` is redacted too, and
+  an unknown id 404s.
+
+### 8. Simulator + minimal live view

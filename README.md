@@ -86,3 +86,15 @@ Terminal 1 should print a `MatchGroup` event (both request ids, a score, and
 a reason) shortly after the second `POST` -- that's the incremental matching
 engine (TASKS.md #5) picking it up off the real-time pipeline, not a
 database poll.
+
+Once matched, fetch either request by id -- pass the *other* rider's id as
+`viewer_request_id` to see the post-match reveal (precise location +
+contact), or leave it off (or pass your own id) to see the same redacted
+view everyone else gets:
+
+```bash
+# <request-a-id> / <request-b-id> are the "id" fields from the two POST
+# responses above.
+curl "http://127.0.0.1:8000/requests/<request-a-id>?viewer_request_id=<request-b-id>"  # full view
+curl "http://127.0.0.1:8000/requests/<request-a-id>"                                    # redacted view
+```

@@ -1,6 +1,6 @@
 from datetime import datetime, time
 from enum import Enum
-from typing import Union
+from typing import Optional, Union
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -66,6 +66,10 @@ class RideRequest(BaseModel):
     contact: str
     status: RequestStatus = RequestStatus.OPEN
     posted_at: datetime = Field(default_factory=datetime.utcnow)
+    # Set by the matching engine at match time (never by a client). The one
+    # other request this one is allowed to reveal precise location/contact
+    # to (TASKS.md #7) -- None until matched.
+    matched_with: Optional[UUID] = None
 
 
 class MatchGroup(BaseModel):
