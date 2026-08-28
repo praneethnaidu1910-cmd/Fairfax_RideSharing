@@ -52,35 +52,24 @@ that works" to "something a real person can actually open and use."
 - **Acceptance**: a known real place name resolves to plausible Northern
   Virginia coordinates; an unrecognized place name fails with a clear
   error, never a silent wrong-location match.
-- **Blocked, 2026-08-28 morning run -- needs a decision:** this
-  scheduled-run sandbox's own outbound network policy denies
-  `nominatim.openstreetmap.org` -- a real HTTPS request to it comes back
-  `403` at the egress gateway (policy denial, not a timeout or a
-  Nominatim-side rate limit; confirmed via the agent-proxy status
-  endpoint, `recentRelayFailures: [{"kind":"connect_rejected","detail":
-  "gateway answered 403 to CONNECT (policy denial or upstream
-  failure)","host":"nominatim.openstreetmap.org:443"}]`). I didn't write
-  any geocoding code this run because of it -- I could build the module
-  and cover it with mocked unit tests, but the actual point of this
-  task's acceptance criterion ("a known real place name resolves to
-  plausible coordinates") is proving the *real* integration works, and I
-  can't prove that in the one environment these automated runs actually
-  execute in. Shipping an HTTP integration that's never once made a real
-  call feels like exactly the "half-working code" this file's own rules
-  tell me not to push.
-- What I need decided (I can't reasonably infer this myself): (a) is
-  Nominatim still the right call given this constraint, or is a
-  different provider worth it instead -- and either way, (b) can
-  automated-run sessions get `nominatim.openstreetmap.org` (or whatever
-  provider we land on) allow-listed on the egress policy, so a future
-  automated run can actually build *and verify* this for real? If the
-  answer is "no, automated runs will never get that host," the fallback
-  I'd reach for is: build it with solid mocked unit tests now, and treat
-  the one real-network check as something only an interactive session
-  (which may have a different, unrestricted egress policy) ever
-  actually runs -- but I'd rather have that confirmed than assume it,
-  since it changes how much confidence to put in "acceptance passing"
-  for this task.
+- **Was blocked, now resolved (2026-08-28):** the 2026-08-28 morning run
+  hit a real wall -- this scheduled-run sandbox's own outbound network
+  policy denies `nominatim.openstreetmap.org` (`403` policy denial at
+  the egress gateway, confirmed via the agent-proxy status endpoint, not
+  a timeout or Nominatim-side rate limit). I looked at what that sandbox
+  actually allow-lists (a small fixed set of package registries -- npm,
+  PyPI, crates.io) and it's not something either of us configures per
+  -task; almost any external API would hit the same wall, so switching
+  providers wouldn't have fixed this either.
+- **Decision:** keep Nominatim. Automated runs build this with solid
+  mocked unit tests only (proving the request-shaping and error-handling
+  logic is correct) -- they never call the real API and never get
+  credited for "acceptance passing" on the real-network half of the
+  criterion. The actual live check (a real place name resolving to real
+  coordinates through the real Nominatim endpoint) happens once, by hand,
+  in an interactive session, which has normal network access. Note this
+  explicitly in the commit/PR description for this task so it's clear
+  what was and wasn't verified by automation alone.
 
 ### 11. Minimal frontend — submit + browse
 - Plain HTML plus a little vanilla JS -- no framework, no build step --
