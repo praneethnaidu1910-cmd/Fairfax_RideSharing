@@ -22,12 +22,80 @@ scheduled agent):
   a shortfall.
 - I merge `nightly` into `main` myself, by hand, after I've reviewed it —
   automated runs never do this.
+- **Anything requiring a real account, billing, or a secret only I have
+  (hosting signup, a database connection string, an API key) is off
+  limits to automated runs, no exceptions** — task 13 below is explicitly
+  marked for this reason. Claude doesn't create accounts or enter payment
+  details on my behalf whether I'm watching or not; that step is mine to
+  do by hand, in an interactive session.
 
 Phase 2 items (multi-region, payments, SMS/OTP identity, moderation
 tooling) are intentionally not listed here — see SCOPE.md's "Phase 2"
 section. Don't pull them forward without an explicit scope conversation.
 
+The original 8-task backlog (matching engine + API) is done -- see
+"Done" below. What's up next is what it takes to get from "backend
+that works" to "something a real person can actually open and use."
+
 ## Up next
+
+### 9. Persistence: PostgreSQL-backed request store
+- Replace `app/store.py`'s in-memory `RequestStore` with a real
+  Postgres-backed one (SQLAlchemy models + Alembic migrations for schema
+  changes), so requests survive a server restart instead of vanishing.
+  `DATABASE_URL` comes from the environment, never hardcoded.
+- For automated runs specifically: stand up a local Postgres inside the
+  sandbox for tests (system package or a container, whatever's available
+  there) -- this doesn't need to be the same instance the real deployed
+  app eventually uses, it just needs to be real enough that
+  restart-survival is actually tested, not mocked.
+- **Acceptance**: the existing API tests (`test_requests_api.py`) pass
+  unchanged against the new store; a new test posts a request, creates a
+  fresh store/session (simulating a restart), and confirms the request
+  is still there.
+
+### 10. Geocoding — informal place names to coordinates
+- Real people type "GMU" or "Fairfax Corner," not lat/lng. Wire intake
+  to a geocoding service that turns a free-text place name into
+  coordinates before it reaches the existing `POST /requests` shape --
+  the request schema itself doesn't change, just what feeds it.
+- Default to Nominatim (OpenStreetMap) -- genuinely free, no API key,
+  consistent with the no-cost stance already in SCOPE.md -- but this is
+  a real judgment call worth confirming, not assuming. If kept, respect
+  its usage policy (1 request/second, a real `User-Agent` identifying
+  this app, not a browser spoof).
+- **Acceptance**: a known real place name resolves to plausible Northern
+  Virginia coordinates; an unrecognized place name fails with a clear
+  error, never a silent wrong-location match.
+
+### 11. Minimal frontend — submit + browse
+- Plain HTML plus a little vanilla JS -- no framework, no build step --
+  served directly by FastAPI (`StaticFiles`/`Jinja2Templates`, not a
+  separate frontend server). One page with a form that `POST`s to
+  `/requests` (using task 10's geocoding for the location fields), one
+  page that lists open requests from `GET /requests` -- same coarse,
+  privacy-safe view the API already returns, nothing new to redact.
+- **Acceptance**: submitting the form actually creates a request visible
+  on the browse page, verified with a `TestClient` request against the
+  page routes themselves, not just the underlying API.
+
+### 12. Minimal frontend — live matches + reveal
+- A page that opens a WebSocket to `/matches` and shows a match the
+  moment it's found, no page refresh. Once matched, surface task 7's
+  reveal in the UI -- the counterpart's real pickup point and contact,
+  using the same `viewer_request_id` mechanism the API already supports.
+- **Acceptance**: manual smoke test (two browser tabs, two compatible
+  requests, a live match appears in both without reloading) documented
+  in the README, the UI equivalent of the existing curl/websocat one.
+
+### 13. Deployment (manual only -- not for automated runs)
+- Get the API, frontend, and database onto a real public URL. This does
+  **not** go through the scheduled routines -- see the rule above. It
+  needs a hosting account and billing setup, which is mine to do by
+  hand; once that account exists, an interactive session can configure
+  the app against whatever connection details/env vars I hand over.
+- **Acceptance**: the app is reachable at a real URL from a phone or
+  laptop that isn't the machine running it.
 
 ## Done
 
