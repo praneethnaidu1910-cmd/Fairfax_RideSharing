@@ -13,7 +13,7 @@ plus incremental matching (#5) below.
 """
 
 import asyncio
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from app.matching.bucketing import build_indexes, candidate_groups, candidates_for
@@ -24,6 +24,9 @@ from app.matching.scoring import (
     expand_schedule,
 )
 from app.schemas import MatchGroup, RequestStatus, RideRequest
+
+if TYPE_CHECKING:
+    from app.store import RequestStore
 
 # A typical sedan's usable passenger capacity for a shared ride -- the
 # "vehicle/trip capacity" docs/MATCHING_ALGORITHM.md's hard constraint
@@ -43,9 +46,19 @@ MIN_DIRECTIONAL_SCORE = 0.5
 
 
 class MatchingEngine:
-    def __init__(self, vehicle_capacity: int = DEFAULT_VEHICLE_CAPACITY) -> None:
+    def __init__(
+        self,
+        vehicle_capacity: int = DEFAULT_VEHICLE_CAPACITY,
+        store: Optional["RequestStore"] = None,
+    ) -> None:
         self._unmatched: list[RideRequest] = []
         self.vehicle_capacity = vehicle_capacity
+        # Optional (TASKS.md #9): when set, persists a request's status/
+        # matched_with the moment this engine flips them, so a match
+        # survives a restart the same way the original open request does.
+        # None everywhere the engine's own tests construct it directly --
+        # no store, no persistence, same in-memory-only behavior as before.
+        self._store = store
         # The real-time pipeline docs/MATCHING_ALGORITHM.md describes:
         # requests trickle in via `incoming` (fed by submit(), drained by
         # run_forever()), and each resulting match is published to
@@ -99,6 +112,9 @@ class MatchingEngine:
             by_id[b_id].status = RequestStatus.MATCHED
             by_id[a_id].matched_with = b_id
             by_id[b_id].matched_with = a_id
+            if self._store is not None:
+                self._store.save(by_id[a_id])
+                self._store.save(by_id[b_id])
             matches.append(
                 MatchGroup(
                     request_ids=[a_id, b_id],
@@ -154,6 +170,9 @@ class MatchingEngine:
         best_candidate.status = RequestStatus.MATCHED
         request.matched_with = best_candidate.id
         best_candidate.matched_with = request.id
+        if self._store is not None:
+            self._store.save(request)
+            self._store.save(best_candidate)
         self._unmatched.remove(best_candidate)
         return [
             MatchGroup(

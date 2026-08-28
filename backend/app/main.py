@@ -4,6 +4,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
+from app.db import make_session_factory
 from app.dispatch.router import router as dispatch_router
 from app.matching.engine import MatchingEngine
 from app.router import router as requests_router
@@ -14,9 +15,13 @@ from app.store import RequestStore
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Fresh per app instance (not a module-level singleton) so each
     # `with TestClient(app) as client:` in tests starts from an empty,
-    # unmatched pool instead of leaking state across tests.
-    app.state.engine = MatchingEngine()
-    app.state.store = RequestStore()
+    # in-memory matching pool instead of leaking state across tests. The
+    # store (TASKS.md #9) is Postgres-backed and DATABASE_URL-driven, so
+    # unlike the pool it deliberately does *not* reset per app instance --
+    # that's the whole point, a request posted in one process is still
+    # there in the next.
+    app.state.store = RequestStore(make_session_factory())
+    app.state.engine = MatchingEngine(store=app.state.store)
     # run_forever() is the incremental-matching pipeline from TASKS.md #5 --
     # started here, per that module's own docstring, so POST /requests can
     # just submit() and let this task do the matching in the background.

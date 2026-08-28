@@ -39,21 +39,6 @@ that works" to "something a real person can actually open and use."
 
 ## Up next
 
-### 9. Persistence: PostgreSQL-backed request store
-- Replace `app/store.py`'s in-memory `RequestStore` with a real
-  Postgres-backed one (SQLAlchemy models + Alembic migrations for schema
-  changes), so requests survive a server restart instead of vanishing.
-  `DATABASE_URL` comes from the environment, never hardcoded.
-- For automated runs specifically: stand up a local Postgres inside the
-  sandbox for tests (system package or a container, whatever's available
-  there) -- this doesn't need to be the same instance the real deployed
-  app eventually uses, it just needs to be real enough that
-  restart-survival is actually tested, not mocked.
-- **Acceptance**: the existing API tests (`test_requests_api.py`) pass
-  unchanged against the new store; a new test posts a request, creates a
-  fresh store/session (simulating a restart), and confirms the request
-  is still there.
-
 ### 10. Geocoding — informal place names to coordinates
 - Real people type "GMU" or "Fairfax Corner," not lat/lng. Wire intake
   to a geocoding service that turns a free-text place name into
@@ -287,3 +272,49 @@ that works" to "something a real person can actually open and use."
 - Added `websockets` to `requirements.txt` as a direct dependency, since
   `simulate.py` imports it directly rather than relying on it coming along
   transitively through `uvicorn[standard]`.
+
+### 9. Persistence: PostgreSQL-backed request store (`f296292`)
+- `app/store.py`'s `RequestStore` is now Postgres-backed: `app/models.py`
+  has the SQLAlchemy `RideRequestORM` table, `app/db.py`'s
+  `make_session_factory()` builds a session factory from `DATABASE_URL`
+  (always read from the environment, never hardcoded), and `migrations/`
+  is a real Alembic setup (`0001_initial.py`) -- schema changes go through
+  a migration, not `Base.metadata.create_all()`.
+- The schedule union (`OneOffSchedule | RecurringSchedule`) doesn't map to
+  a single SQL column, so the table stores `schedule_type` +
+  a JSONB `schedule` blob, and `app/store.py`'s `_to_orm`/`_from_orm` are
+  the one place that conversion happens -- mirrors how `app/privacy.py`'s
+  `to_public()` is the one place the public-view conversion happens.
+- `MatchingEngine` takes an optional `store` (default `None`, so every
+  existing `MatchingEngine()` call in `test_engine.py` is unaffected) and
+  calls `store.save(request)` right where it already flips `status`/
+  `matched_with` on a match, in both `match_batch()` and
+  `on_new_request()` -- so a match survives a restart the same way the
+  original open request does, without engine.py needing to know anything
+  about SQL. `app/main.py`'s lifespan wires `MatchingEngine(store=...)`.
+- Deliberately did **not** rebuild `MatchingEngine._unmatched` from the
+  store on startup -- that pool stays in-memory/ephemeral by design (it's
+  a bucketing working set, not the source of truth) and TASKS.md's own
+  acceptance wording only asks for `GET /requests[/{id}]` to survive a
+  restart, not for in-flight matching to resume mid-pool. Worth revisiting
+  if a real restart losing not-yet-matched requests' matchability turns
+  out to matter in practice.
+- Tests (`tests/test_store_persistence.py`): a request posted through one
+  `RequestStore`/session factory is still there through a second,
+  independent one pointed at the same database (the literal "simulate a
+  restart" acceptance criterion), same for `list_open()`, and a `save()`
+  status flip persists across that same restart simulation too.
+  `tests/conftest.py` runs the real `alembic upgrade head` against a local
+  `fairfax_ridesharing_test` database once per test session (not
+  `create_all()`, so the migration itself is what's under test) and
+  truncates `ride_requests` between tests. `test_requests_api.py` passes
+  completely unchanged -- confirmed with a diff-free `git status` on that
+  file -- since the store's public interface (`add`/`get`/`list_open`)
+  didn't change shape, only its backing.
+- Manually verified restart-survival at the actual HTTP level too, not
+  just via the store directly: posted a request to a live `uvicorn`
+  process, killed it, started a fresh process against the same
+  `DATABASE_URL`, and `GET /requests/{id}` still returned it.
+- Added `sqlalchemy`, `alembic`, and `psycopg2-binary` to
+  `requirements.txt`, and documented local Postgres setup (dev + the
+  separate test database) in the root README.

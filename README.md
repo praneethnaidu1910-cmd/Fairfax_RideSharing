@@ -30,9 +30,18 @@ doesn't do.
 
 ## Running locally
 
+Requests are stored in Postgres (TASKS.md #9), so a running Postgres
+instance and a `DATABASE_URL` are required — nothing falls back to
+in-memory or SQLite.
+
 ```bash
+# once: create a database and point DATABASE_URL at it
+createdb fairfax_ridesharing
+export DATABASE_URL="postgresql+psycopg2://<user>:<password>@127.0.0.1:5432/fairfax_ridesharing"
+
 cd backend
 pip install -r requirements.txt
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
@@ -40,6 +49,13 @@ uvicorn app.main:app --reload
 cd backend
 pytest
 ```
+
+The test suite doesn't reuse `DATABASE_URL` above — it defaults (see
+`tests/conftest.py`) to a separate local `fairfax_ridesharing_test`
+database so test runs never touch dev data, applying the real Alembic
+migrations at the start of the run and truncating `ride_requests` between
+tests. Override with `DATABASE_URL` if your local Postgres role/database
+names differ from the default `fairfax_app`/`fairfax_ridesharing_test`.
 
 ## Simulator: watch the sample dataset match in real time
 
