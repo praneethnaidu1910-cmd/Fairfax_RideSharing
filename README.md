@@ -57,6 +57,28 @@ migrations at the start of the run and truncating `ride_requests` between
 tests. Override with `DATABASE_URL` if your local Postgres role/database
 names differ from the default `fairfax_app`/`fairfax_ridesharing_test`.
 
+## Geocoding: place names to coordinates
+
+`GET /geocode?q=<place name>` (TASKS.md #10) wraps Nominatim (OpenStreetMap)
+to turn something like "GMU" or "Fairfax Corner" into a `{lat, lng}` — this
+is what a client calls *before* `POST /requests`, not a change to that
+endpoint's shape. It 404s with a clear error for an unrecognized place
+rather than guessing.
+
+`pytest` only exercises this with the real Nominatim call mocked — this
+sandbox's own outbound network policy denies `nominatim.openstreetmap.org`
+outright, so automated runs can prove the request-shaping and
+error-handling logic but not that the live API actually resolves a real
+place. That live check is manual, from a machine with normal network
+access:
+
+```bash
+curl "http://127.0.0.1:8000/geocode?q=George+Mason+University"
+# {"lat": 38.83..., "lng": -77.30...} -- plausible Fairfax-area coordinates
+curl "http://127.0.0.1:8000/geocode?q=Definitely+Not+A+Real+Place+XYZ"
+# 404, clear error, not a silent wrong match
+```
+
 ## Simulator: watch the sample dataset match in real time
 
 With the server running (`uvicorn app.main:app --reload` from `backend/`),

@@ -11,10 +11,23 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
+from app.geocoding import PlaceNotFoundError, geocode_place
 from app.privacy import to_public
-from app.schemas import RideRequest, RideRequestCreate, RideRequestPublic
+from app.schemas import Location, RideRequest, RideRequestCreate, RideRequestPublic
 
 router = APIRouter()
+
+
+@router.get("/geocode", response_model=Location)
+def geocode(q: str) -> Location:
+    """Turns a free-text place name into coordinates (TASKS.md #10) -- the
+    thing a client calls *before* POST /requests, not a change to that
+    endpoint's shape. 404s with a clear message on no match rather than
+    guessing a location."""
+    try:
+        return geocode_place(q)
+    except PlaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/requests", response_model=RideRequestPublic, status_code=201)

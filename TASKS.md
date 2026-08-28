@@ -39,38 +39,6 @@ that works" to "something a real person can actually open and use."
 
 ## Up next
 
-### 10. Geocoding — informal place names to coordinates
-- Real people type "GMU" or "Fairfax Corner," not lat/lng. Wire intake
-  to a geocoding service that turns a free-text place name into
-  coordinates before it reaches the existing `POST /requests` shape --
-  the request schema itself doesn't change, just what feeds it.
-- Default to Nominatim (OpenStreetMap) -- genuinely free, no API key,
-  consistent with the no-cost stance already in SCOPE.md -- but this is
-  a real judgment call worth confirming, not assuming. If kept, respect
-  its usage policy (1 request/second, a real `User-Agent` identifying
-  this app, not a browser spoof).
-- **Acceptance**: a known real place name resolves to plausible Northern
-  Virginia coordinates; an unrecognized place name fails with a clear
-  error, never a silent wrong-location match.
-- **Was blocked, now resolved (2026-08-28):** the 2026-08-28 morning run
-  hit a real wall -- this scheduled-run sandbox's own outbound network
-  policy denies `nominatim.openstreetmap.org` (`403` policy denial at
-  the egress gateway, confirmed via the agent-proxy status endpoint, not
-  a timeout or Nominatim-side rate limit). I looked at what that sandbox
-  actually allow-lists (a small fixed set of package registries -- npm,
-  PyPI, crates.io) and it's not something either of us configures per
-  -task; almost any external API would hit the same wall, so switching
-  providers wouldn't have fixed this either.
-- **Decision:** keep Nominatim. Automated runs build this with solid
-  mocked unit tests only (proving the request-shaping and error-handling
-  logic is correct) -- they never call the real API and never get
-  credited for "acceptance passing" on the real-network half of the
-  criterion. The actual live check (a real place name resolving to real
-  coordinates through the real Nominatim endpoint) happens once, by hand,
-  in an interactive session, which has normal network access. Note this
-  explicitly in the commit/PR description for this task so it's clear
-  what was and wasn't verified by automation alone.
-
 ### 11. Minimal frontend — submit + browse
 - Plain HTML plus a little vanilla JS -- no framework, no build step --
   served directly by FastAPI (`StaticFiles`/`Jinja2Templates`, not a
@@ -101,6 +69,47 @@ that works" to "something a real person can actually open and use."
   laptop that isn't the machine running it.
 
 ## Done
+
+### 10. Geocoding — informal place names to coordinates (`5e6f523`)
+- `app/geocoding.py`'s `geocode_place()` wraps Nominatim's `/search`
+  endpoint: a `viewbox` covering every town SCOPE.md names (Fairfax,
+  Ashburn, Herndon, Chantilly, Reston, Aldie, Manassas, Sterling, South
+  Riding, Vienna, Falls Church, Centerville) plus `bounded=1` so a place
+  name never silently resolves to a same-named place outside Northern
+  Virginia, a real identifying `User-Agent` (not a browser spoof), and a
+  module-level `_wait_for_rate_limit()` that sleeps as needed to respect
+  Nominatim's 1-request/second usage policy across calls, not just
+  document it. An empty/blank place name is rejected before any HTTP call
+  is made; no match, or any HTTP error, raises rather than returning a
+  guessed location.
+- `GET /geocode?q=<place name>` (`app/router.py`) is the seam this task's
+  own wording asks for -- "before it reaches the existing `POST
+  /requests` shape, the request schema itself doesn't change" --
+  `RideRequestCreate` is untouched; this is what a client (task 11's
+  frontend) calls first to turn free text into the `Location` that
+  endpoint already expects. 404s with the place name in the error detail
+  on no match.
+- This sandbox's network policy denies `nominatim.openstreetmap.org`
+  outright (confirmed by the 2026-08-28 morning run, via the agent-proxy
+  status endpoint -- a policy `403`, not a timeout or a Nominatim-side
+  rate limit), and almost any external API would hit the same wall, so
+  switching providers wouldn't have helped either -- decided to keep
+  Nominatim and have automated runs build/test this with `httpx.get`
+  mocked only. `tests/test_geocoding.py` covers the viewbox/User-Agent
+  request shape, the empty-input short-circuit, the not-found path, HTTP
+  errors propagating instead of a silent wrong match, the rate limiter's
+  sleep math, and the `/geocode` route's 200/404 paths through a real
+  `TestClient`. None of this calls the real API, and none of it is
+  credited as verifying the live half of this task's acceptance
+  criterion.
+- **Not yet manually verified.** This run (like the ones before it) is
+  the sandboxed automated environment that can't reach
+  `nominatim.openstreetmap.org` at all -- so per the decision above, I'm
+  marking the mocked half of this task done and leaving the live check
+  (`GET /geocode?q=...` against a real running server, from a session
+  with normal network access) as a real to-do for me, by hand, before I'd
+  call this fully trustworthy. Steps are in the README's new "Geocoding"
+  section.
 
 ### 1. Data models + sample dataset (`1329205300f1b225c1393eb17fbc848dca0e1861`)
 - `RideRequest` now has a `schedule: OneOffSchedule | RecurringSchedule`
