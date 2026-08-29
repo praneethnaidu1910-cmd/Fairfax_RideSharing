@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Your ride request{% endblock %}
+{% block heading %}Your ride request{% endblock %}
+{% block content %}
+<p class="hint">
+  Request id: <code>{{ request_id }}</code> -- bookmark this page to check
+  back later.
+</p>
+
+{% if reveal %}
+<div id="reveal-box" class="request-card">
+  <p><strong>Matched!</strong> Your ride partner, {{ reveal.rider_id }}:</p>
+  <ul>
+    <li>Contact: {{ reveal.contact }}</li>
+    <li>Pickup: {{ reveal.origin.lat }}, {{ reveal.origin.lng }}</li>
+    <li>Dropoff: {{ reveal.destination.lat }}, {{ reveal.destination.lng }}</li>
+  </ul>
+</div>
+{% else %}
+<p id="waiting-message">Waiting for a match... this page updates itself, no need to reload.</p>
+<div id="reveal-box" class="request-card" hidden></div>
+<script>
+  window.MY_REQUEST_ID = "{{ request_id }}";
+</script>
+<script src="/static/live.js"></script>
+{% endif %}
+
+<p><a href="/browse">Browse all open requests</a></p>
+{% endblock %}

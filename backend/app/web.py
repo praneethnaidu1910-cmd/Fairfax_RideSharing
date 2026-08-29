@@ -1,7 +1,10 @@
-"""Minimal server-rendered frontend (TASKS.md #11): a plain HTML form that
-posts a new ride request, and a browse page listing open ones -- no
-framework, no build step, no separate frontend server. FastAPI serves the
-templates directly (Jinja2Templates), the same app that serves the JSON API.
+"""Minimal server-rendered frontend: a plain HTML form that posts a new
+ride request (TASKS.md #11), a browse page listing open ones (#11), and a
+per-rider "waiting for a match" page that updates live over the existing
+/matches WebSocket and reveals the counterpart the moment a match is found
+(#12) -- no framework, no build step, no separate frontend server. FastAPI
+serves the templates directly (Jinja2Templates), the same app that serves
+the JSON API.
 
 Deliberately reuses app/router.py's create_request() instead of
 re-implementing request creation here, so this is one more caller of the
@@ -11,8 +14,9 @@ validation/privacy rules.
 
 from pathlib import Path
 from typing import Optional
+from uuid import UUID
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -108,11 +112,41 @@ async def submit_new_request(
     except (ValidationError, ValueError, TypeError) as exc:
         return _error(f"Couldn't post that request: {exc}")
 
-    await create_request(payload, request)
-    return RedirectResponse(url="/browse", status_code=303)
+    created = await create_request(payload, request)
+    # TASKS.md #12's live-match page needs to know "my own request id" to
+    # watch for -- redirecting here (instead of straight to /browse) is
+    # what hands it over, as a URL the rider can bookmark/reload.
+    return RedirectResponse(url=f"/mine/{created.id}", status_code=303)
 
 
 @router.get("/browse")
 def browse_requests(request: Request):
     open_requests = [to_public(r) for r in request.app.state.store.list_open()]
     return templates.TemplateResponse(request, "browse.html", {"requests": open_requests})
+
+
+@router.get("/mine/{request_id}")
+def my_request_status(request_id: UUID, request: Request):
+    """TASKS.md #12: the rider's own "waiting for a match" page. Opens a
+    WebSocket to /matches client-side (static/live.js) and shows the
+    reveal the moment a match involving this request arrives -- no
+    reload. If the request is already matched by the time this page loads
+    (e.g. a reload after the fact), render the reveal server-side instead
+    of making the rider wait on a WebSocket event that already happened.
+    """
+    store = request.app.state.store
+    mine = store.get(request_id)
+    if mine is None:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    reveal = None
+    if mine.matched_with is not None:
+        counterpart = store.get(mine.matched_with)
+        if counterpart is not None:
+            reveal = counterpart
+
+    return templates.TemplateResponse(
+        request,
+        "mine.html",
+        {"request_id": request_id, "reveal": reveal},
+    )

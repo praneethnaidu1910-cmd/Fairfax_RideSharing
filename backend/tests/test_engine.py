@@ -169,3 +169,33 @@ async def test_run_forever_publishes_match_for_two_submitted_requests():
     assert engine.matches.qsize() == 1
     match = engine.matches.get_nowait()
     assert set(match.request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}
+
+
+@pytest.mark.asyncio
+async def test_run_forever_broadcasts_match_to_every_subscriber():
+    # TASKS.md #12 needs two simultaneous WebSocket connections (two
+    # browser tabs) to both see the same match -- subscribe() is what
+    # makes that a real broadcast instead of the two connections splitting
+    # a single shared queue competing-consumer style.
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+
+    subscriber_a = engine.subscribe()
+    subscriber_b = engine.subscribe()
+
+    worker = asyncio.create_task(engine.run_forever())
+    await engine.submit(by_rider["rider-1"])
+    await engine.submit(by_rider["rider-7"])
+    await engine.incoming.join()
+
+    worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await worker
+
+    match_a = subscriber_a.get_nowait()
+    match_b = subscriber_b.get_nowait()
+    assert set(match_a.request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}
+    assert set(match_b.request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}
+    # The pre-existing single-subscriber queue still gets it too -- nothing
+    # about adding subscribe() should regress it.
+    assert engine.matches.qsize() == 1

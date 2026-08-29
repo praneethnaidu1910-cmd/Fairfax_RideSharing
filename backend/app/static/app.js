@@ -23,10 +23,19 @@ async function geocodeField(input) {
   status.textContent = "Looking up...";
   try {
     const response = await fetch("/geocode?q=" + encodeURIComponent(place));
-    if (!response.ok) {
+    if (response.status === 404) {
+      // A confirmed "no such place" from the server -- safe to clear
+      // whatever lat/lng was there before, since it no longer applies.
       latField.value = "";
       lngField.value = "";
       status.textContent = "Couldn't find that place -- try a more specific name.";
+      return;
+    }
+    if (!response.ok) {
+      // A transient server/network problem, not "not found" -- leave any
+      // previously-resolved lat/lng alone rather than wiping it out from
+      // under a field the rider already filled in successfully.
+      status.textContent = "Lookup failed -- check your connection and try again.";
       return;
     }
     const location = await response.json();

@@ -39,15 +39,6 @@ that works" to "something a real person can actually open and use."
 
 ## Up next
 
-### 12. Minimal frontend — live matches + reveal
-- A page that opens a WebSocket to `/matches` and shows a match the
-  moment it's found, no page refresh. Once matched, surface task 7's
-  reveal in the UI -- the counterpart's real pickup point and contact,
-  using the same `viewer_request_id` mechanism the API already supports.
-- **Acceptance**: manual smoke test (two browser tabs, two compatible
-  requests, a live match appears in both without reloading) documented
-  in the README, the UI equivalent of the existing curl/websocat one.
-
 ### 13. Deployment (manual only -- not for automated runs)
 - Get the API, frontend, and database onto a real public URL. This does
   **not** go through the scheduled routines -- see the rule above. It
@@ -58,6 +49,50 @@ that works" to "something a real person can actually open and use."
   laptop that isn't the machine running it.
 
 ## Done
+
+### 12. Minimal frontend — live matches + reveal (`c04feed`)
+- `GET /mine/{request_id}` (`app/web.py`) is the rider's own "waiting for a
+  match" page -- lands there straight off `POST /new`'s redirect (changed
+  from redirecting to `/browse`, since this page is what needs to know
+  "my own request id"). `app/static/live.js` opens a WebSocket to the
+  existing `/matches` route and, the moment a `MatchGroup` mentioning this
+  page's own id arrives, calls `GET /requests/{counterpart_id}
+  ?viewer_request_id={my_id}` (task 7's exact mechanism) and renders the
+  reveal in place -- no reload. If the request is already matched when the
+  page loads (e.g. a reload after the fact), the reveal renders
+  server-side instead of waiting on a WebSocket event that already fired.
+- Fixed a real gap this task's own acceptance criterion (two browser tabs,
+  both see the same match) would have failed on: `WS /matches` used to
+  read every connection off one shared `engine.matches` queue,
+  competing-consumer style -- task 6's own docstring already flagged this
+  as fine "for a single subscriber" but not built for more. Two
+  simultaneous tabs need the *same* match event each, not one queue split
+  between them, so `MatchingEngine.subscribe()`/`unsubscribe()`
+  (`app/matching/engine.py`) hand out one independent queue per WebSocket
+  connection, and `run_forever()` now feeds every subscriber, not just the
+  original `self.matches` queue (kept as-is for `test_engine.py` and
+  `simulate.py`'s existing single-subscriber usage).
+- Tests: `tests/test_engine.py`'s new
+  `test_run_forever_broadcasts_match_to_every_subscriber` proves two
+  `subscribe()`'d queues both get a copy of the same match.
+  `tests/test_live_matches.py` proves the same thing at the HTTP/WS level
+  (two simultaneous `TestClient` WebSocket connections both receive one
+  match), and that `/mine/{id}` renders "waiting" before a match and the
+  correct counterpart's reveal (never your own contact) after one.
+  `tests/test_web_frontend.py` updated for the new `/mine/<id>` redirect
+  target (was `/browse`).
+- Manually verified the actual acceptance criterion -- two browser tabs,
+  live update, no reload -- with a headless-Chromium (Playwright) script
+  against a live server, since this sandbox has no real browser to drive
+  by hand and `/geocode`'s real network call is blocked here the same way
+  TASKS.md #10 documents (the script stubs only that one endpoint, the
+  rest of the flow -- posting, redirecting, the live WebSocket update, the
+  reveal -- runs for real). That run surfaced and led to fixing a real bug
+  in `app/static/app.js`: a failed `/geocode` call was treating a
+  transient 500 the same as a confirmed 404 "not found," clearing a
+  hidden lat/lng field the rider had already filled in correctly. Steps
+  to reproduce this by hand are in the root README's new "Web frontend"
+  section.
 
 ### 11. Minimal frontend — submit + browse (`81827b3`)
 - `app/web.py` adds `GET`/`POST /new` (the submission form) and

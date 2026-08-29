@@ -74,17 +74,20 @@ def get_request(request_id: UUID, request: Request, viewer_request_id: Optional[
 async def stream_matches(websocket: WebSocket) -> None:
     """Streams each MatchGroup as the engine finds it.
 
-    Reads directly off engine.matches (an asyncio.Queue), so with more than
-    one connection open, matches are split competing-consumer style across
-    them rather than broadcast to all -- fine for this demo's single
-    subscriber (TASKS.md #8's simulator/live view); a real fan-out would
-    need a per-connection queue, not built speculatively.
+    Each connection gets its own queue from engine.subscribe() (TASKS.md
+    #12) instead of reading engine.matches directly, so N simultaneous
+    connections each receive a copy of every match rather than splitting
+    them competing-consumer style -- the two-browser-tabs case #12's
+    acceptance criterion needs actually works now.
     """
     await websocket.accept()
     engine = websocket.app.state.engine
+    queue = engine.subscribe()
     try:
         while True:
-            match = await engine.matches.get()
+            match = await queue.get()
             await websocket.send_json(match.model_dump(mode="json"))
     except WebSocketDisconnect:
         pass
+    finally:
+        engine.unsubscribe(queue)

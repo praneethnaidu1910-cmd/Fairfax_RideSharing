@@ -148,3 +148,38 @@ view everyone else gets:
 curl "http://127.0.0.1:8000/requests/<request-a-id>?viewer_request_id=<request-b-id>"  # full view
 curl "http://127.0.0.1:8000/requests/<request-a-id>"                                    # redacted view
 ```
+
+## Web frontend: submit, browse, and watch for a live match
+
+With the server running (`uvicorn app.main:app --reload` from `backend/`),
+`GET /new` (TASKS.md #11) is the structured intake form -- type a place name
+in the pickup/destination fields and it geocodes to lat/lng in the
+background (TASKS.md #10) before the form posts. Submitting redirects to
+`GET /mine/<request-id>` (TASKS.md #12), which opens a WebSocket to
+`/matches` and reveals the counterpart's real pickup point and contact the
+moment a match is found -- no page reload. `GET /browse` lists every open
+request in the same coarse, privacy-safe shape `GET /requests` returns.
+
+Manual smoke test, the UI equivalent of the WebSocket/curl one above --
+this is what TASKS.md #12's acceptance criterion asks for, since there's no
+browser in this project's automated test sandbox to drive two tabs at once:
+
+1. Open `http://127.0.0.1:8000/new` in **two separate browser tabs**.
+2. In tab 1, post a one-off request (e.g. Fairfax -> Aldie, a departure
+   window a couple hours out). You land on `/mine/<id>`, showing "Waiting
+   for a match..."
+3. In tab 2, post a compatible request (close-but-not-identical origin,
+   same destination, an overlapping window -- mirroring the root README's
+   curl example above).
+4. Both tabs should update **within a second or two, without reloading**:
+   tab 1 shows tab 2's rider/contact/pickup/dropoff, and vice versa.
+
+Verified this exact flow with a headless-Chromium (Playwright) script
+against a live server in this sandbox, since `/geocode`'s own real-network
+call is blocked here the same way TASKS.md #10 already documents -- the
+script stubs that one endpoint and drives the rest of the app for real: two
+tabs, two posted requests, both reveals appearing live. That run also
+caught a real bug fixed alongside this: `app/static/app.js` was treating
+any failed `/geocode` call (including a transient 500) the same as a
+confirmed 404 "place not found," silently wiping out a field the rider had
+already filled in correctly.

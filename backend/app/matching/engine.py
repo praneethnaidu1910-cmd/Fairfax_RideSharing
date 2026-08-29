@@ -65,6 +65,13 @@ class MatchingEngine:
         # `matches` for a subscriber -- TASKS.md #6's WebSocket -- to read.
         self.incoming: "asyncio.Queue[RideRequest]" = asyncio.Queue()
         self.matches: "asyncio.Queue[MatchGroup]" = asyncio.Queue()
+        # Real fan-out for TASKS.md #12: `self.matches` alone only lets one
+        # reader ever drain a given match (a second simultaneous WS
+        # connection would just starve, per the gap router.py's own
+        # docstring used to flag). Each subscribe() call hands out an
+        # independent queue that run_forever() also feeds, so N connected
+        # clients each get a copy of every match, not N-1 of them starving.
+        self._subscribers: list["asyncio.Queue[MatchGroup]"] = []
 
     def match_batch(self, requests: list[RideRequest]) -> list[MatchGroup]:
         """Score every bucketed candidate pair once, sort descending, then
@@ -187,16 +194,31 @@ class MatchingEngine:
         puts it on `incoming` for run_forever() to pick up."""
         await self.incoming.put(request)
 
+    def subscribe(self) -> "asyncio.Queue[MatchGroup]":
+        """Registers a new queue that receives a copy of every future match
+        alongside the shared `self.matches` queue -- call this once per
+        WebSocket connection (TASKS.md #12 needs two simultaneous tabs to
+        both see the same match) and unsubscribe() when that connection
+        closes."""
+        queue: "asyncio.Queue[MatchGroup]" = asyncio.Queue()
+        self._subscribers.append(queue)
+        return queue
+
+    def unsubscribe(self, queue: "asyncio.Queue[MatchGroup]") -> None:
+        self._subscribers.remove(queue)
+
     async def run_forever(self) -> None:
         """Drain `incoming` one request at a time, running each through
         on_new_request() (never a full recompute) and publishing any
-        resulting match to `matches`. Runs until cancelled -- intended to
-        be launched as a background task, e.g. by TASKS.md #6's app
-        startup and by #8's simulator."""
+        resulting match to `matches` plus every subscribe()'d queue. Runs
+        until cancelled -- intended to be launched as a background task,
+        e.g. by TASKS.md #6's app startup and by #8's simulator."""
         while True:
             request = await self.incoming.get()
             try:
                 for match in self.on_new_request(request):
                     await self.matches.put(match)
+                    for subscriber in self._subscribers:
+                        await subscriber.put(match)
             finally:
                 self.incoming.task_done()

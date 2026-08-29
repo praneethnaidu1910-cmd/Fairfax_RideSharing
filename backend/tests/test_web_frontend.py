@@ -53,17 +53,24 @@ def test_submitting_form_creates_request_visible_on_browse_page():
     with TestClient(app) as client:
         post_response = client.post("/new", data=form_data, follow_redirects=False)
         assert post_response.status_code == 303
-        assert post_response.headers["location"] == "/browse"
+        # Redirects to the rider's own "waiting for a match" page (#12),
+        # not straight to /browse -- that page is where request_id lives.
+        location = post_response.headers["location"]
+        assert location.startswith("/mine/")
 
+        mine_response = client.get(location)
         browse_response = client.get("/browse")
 
+    assert mine_response.status_code == 200
+    assert "Waiting for a match" in mine_response.text
     assert browse_response.status_code == 200
     assert "web-form-rider" in browse_response.text
-    # Privacy: the browse page is the same coarse view GET /requests
-    # returns -- never the precise coordinates or contact submitted above.
-    assert "555-0100-secret" not in browse_response.text
-    assert str(FAIRFAX[0]) not in browse_response.text
-    assert str(FAIRFAX[1]) not in browse_response.text
+    # Privacy: neither page is anything but the coarse/no-contact view --
+    # never the precise coordinates or contact submitted above.
+    for page in (mine_response.text, browse_response.text):
+        assert "555-0100-secret" not in page
+        assert str(FAIRFAX[0]) not in page
+        assert str(FAIRFAX[1]) not in page
 
 
 def test_submitting_recurring_schedule_creates_request_visible_on_browse_page():
