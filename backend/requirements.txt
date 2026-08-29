@@ -10,3 +10,5 @@ websockets
 sqlalchemy
 alembic
 psycopg2-binary
+jinja2
+python-multipart

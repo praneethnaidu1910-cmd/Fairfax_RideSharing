@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Browse open ride requests{% endblock %}
+{% block heading %}Open ride requests{% endblock %}
+{% block content %}
+{% if not requests %}
+<p>No open requests yet -- <a href="/new">post one</a>.</p>
+{% endif %}
+{% for r in requests %}
+<div class="request-card">
+  <div class="status">{{ r.status.value }}</div>
+  <div><strong>{{ r.rider_id }}</strong> -- {{ r.seats_needed }} seat(s)</div>
+  <div>{{ r.origin_area }} &rarr; {{ r.destination_area }}</div>
+  {% if r.schedule.earliest_departure is defined %}
+  <div>{{ r.schedule.earliest_departure }} - {{ r.schedule.latest_departure }}</div>
+  {% else %}
+  <div>Recurring: days {{ r.schedule.weekdays }}, {{ r.schedule.earliest_departure_time }} - {{ r.schedule.latest_departure_time }}</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

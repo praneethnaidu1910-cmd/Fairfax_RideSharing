@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Fairfax Ride Pooling{% endblock %}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  nav { margin-bottom: 1.5rem; }
+  nav a { margin-right: 1rem; }
+  fieldset { margin-bottom: 1rem; border: 1px solid #ddd; }
+  label { display: block; margin-top: 0.6rem; font-weight: 600; }
+  input, select { width: 100%; padding: 0.4rem; box-sizing: border-box; margin-top: 0.2rem; }
+  input[type=checkbox] { width: auto; margin-right: 0.3rem; }
+  button { margin-top: 1rem; padding: 0.5rem 1rem; }
+  .error { color: #b00020; }
+  .hint { color: #666; font-size: 0.85rem; margin-top: 0.2rem; }
+  .request-card { border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem; }
+  .request-card .status { font-weight: bold; text-transform: uppercase; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/new">Post a ride request</a>
+  <a href="/browse">Browse open requests</a>
+</nav>
+<h1>{% block heading %}{% endblock %}</h1>
+{% block content %}{% endblock %}
+</body>
+</html>

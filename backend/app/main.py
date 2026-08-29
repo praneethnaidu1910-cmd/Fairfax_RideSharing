@@ -1,14 +1,17 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.db import make_session_factory
 from app.dispatch.router import router as dispatch_router
 from app.matching.engine import MatchingEngine
 from app.router import router as requests_router
 from app.store import RequestStore
+from app.web import router as web_router
 
 
 @asynccontextmanager
@@ -36,6 +39,10 @@ app = FastAPI(title="Ride-Pooling Matching Engine (Demo)", lifespan=lifespan)
 
 app.include_router(dispatch_router)
 app.include_router(requests_router)
+app.include_router(web_router)
+app.mount(
+    "/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static"
+)
 
 
 @app.get("/health")

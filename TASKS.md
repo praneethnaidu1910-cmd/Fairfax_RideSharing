@@ -39,17 +39,6 @@ that works" to "something a real person can actually open and use."
 
 ## Up next
 
-### 11. Minimal frontend — submit + browse
-- Plain HTML plus a little vanilla JS -- no framework, no build step --
-  served directly by FastAPI (`StaticFiles`/`Jinja2Templates`, not a
-  separate frontend server). One page with a form that `POST`s to
-  `/requests` (using task 10's geocoding for the location fields), one
-  page that lists open requests from `GET /requests` -- same coarse,
-  privacy-safe view the API already returns, nothing new to redact.
-- **Acceptance**: submitting the form actually creates a request visible
-  on the browse page, verified with a `TestClient` request against the
-  page routes themselves, not just the underlying API.
-
 ### 12. Minimal frontend — live matches + reveal
 - A page that opens a WebSocket to `/matches` and shows a match the
   moment it's found, no page refresh. Once matched, surface task 7's
@@ -69,6 +58,41 @@ that works" to "something a real person can actually open and use."
   laptop that isn't the machine running it.
 
 ## Done
+
+### 11. Minimal frontend — submit + browse (`81827b3`)
+- `app/web.py` adds `GET`/`POST /new` (the submission form) and
+  `GET /browse` (the open-requests list), served as plain Jinja2 templates
+  (`app/templates/`) plus one vanilla-JS file (`app/static/app.js`) --
+  `StaticFiles`/`Jinja2Templates` off the same FastAPI app, no separate
+  frontend process, per this task's own wording.
+- The form collects free-text place names, not raw coordinates --
+  `app.js` calls task 10's `GET /geocode` on blur and fills hidden
+  `origin_lat`/`origin_lng`/`destination_lat`/`destination_lng` inputs, so
+  the actual `POST /new` body is the same lat/lng shape the JSON API
+  already expects. A failed geocode, or any other validation problem,
+  re-renders the form with an error and everything the rider already
+  typed rather than clearing the form.
+- `POST /new` builds a `RideRequestCreate` and calls `app/router.py`'s
+  `create_request()` directly instead of reimplementing intake -- one more
+  caller of the existing store/engine pipeline, not a second one with its
+  own rules. `GET /browse` renders the same `to_public()` coarse view
+  `GET /requests` already returns, so there's no new redaction logic here
+  to get wrong.
+- The form supports both schedule shapes (one-off window, recurring
+  weekdays), not just one-off -- SCOPE.md calls recurring "first-class,"
+  and the whole point of a structured form over the WhatsApp group is not
+  making people repost the same request daily.
+- Tests (`tests/test_web_frontend.py`) hit the page routes themselves
+  through `TestClient`, per this task's own acceptance wording: `GET /new`
+  renders a form, `POST /new` (both one-off and recurring) redirects to
+  `/browse` and the posted rider shows up there, and neither the precise
+  coordinates nor the contact info leak onto that page. Also manually
+  verified against a live `uvicorn` instance with `curl` (no browser in
+  this sandbox) -- posted through `/new`, confirmed the rider shows up on
+  `/browse` and the contact string doesn't.
+- Added `jinja2` and `python-multipart` to `requirements.txt` --
+  `Jinja2Templates` and FastAPI's `Form()` parsing both need them and
+  neither came in transitively already.
 
 ### 10. Geocoding — informal place names to coordinates (`5e6f523`)
 - `app/geocoding.py`'s `geocode_place()` wraps Nominatim's `/search`

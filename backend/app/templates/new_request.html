@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Post a ride request{% endblock %}
+{% block heading %}Post a ride request{% endblock %}
+{% block content %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/new">
+  <label for="rider_id">Your name</label>
+  <input type="text" id="rider_id" name="rider_id" required value="{{ form.rider_id if form else '' }}">
+
+  <label for="origin_place">Pickup place (e.g. "Fairfax Corner")</label>
+  <input type="text" id="origin_place" name="origin_place" required
+         value="{{ form.origin_place if form else '' }}" data-geocode-target="origin">
+  <p class="hint" id="origin_place_status"></p>
+  <input type="hidden" id="origin_lat" name="origin_lat" value="{{ form.origin_lat if form else '' }}">
+  <input type="hidden" id="origin_lng" name="origin_lng" value="{{ form.origin_lng if form else '' }}">
+
+  <label for="destination_place">Destination place</label>
+  <input type="text" id="destination_place" name="destination_place" required
+         value="{{ form.destination_place if form else '' }}" data-geocode-target="destination">
+  <p class="hint" id="destination_place_status"></p>
+  <input type="hidden" id="destination_lat" name="destination_lat" value="{{ form.destination_lat if form else '' }}">
+  <input type="hidden" id="destination_lng" name="destination_lng" value="{{ form.destination_lng if form else '' }}">
+
+  <label>
+    <input type="radio" name="schedule_type" value="one_off"
+           {% if not form or form.schedule_type == 'one_off' %}checked{% endif %}> One-off trip
+  </label>
+  <label>
+    <input type="radio" name="schedule_type" value="recurring"
+           {% if form and form.schedule_type == 'recurring' %}checked{% endif %}> Recurring (weekdays)
+  </label>
+
+  <fieldset id="one_off_fields">
+    <legend>One-off trip window</legend>
+    <label for="earliest_departure">Earliest departure</label>
+    <input type="datetime-local" id="earliest_departure" name="earliest_departure"
+           value="{{ form.earliest_departure if form else '' }}">
+    <label for="latest_departure">Latest departure</label>
+    <input type="datetime-local" id="latest_departure" name="latest_departure"
+           value="{{ form.latest_departure if form else '' }}">
+  </fieldset>
+
+  <fieldset id="recurring_fields">
+    <legend>Recurring weekday window</legend>
+    <label>Weekdays</label>
+    {% set day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] %}
+    {% for day in range(7) %}
+    <label style="display:inline-block; font-weight: normal; margin-right: 0.75rem;">
+      <input type="checkbox" name="weekdays" value="{{ day }}"
+             {% if form and day in form.weekdays %}checked{% endif %}> {{ day_names[day] }}
+    </label>
+    {% endfor %}
+    <label for="earliest_departure_time">Earliest departure time</label>
+    <input type="time" id="earliest_departure_time" name="earliest_departure_time"
+           value="{{ form.earliest_departure_time if form else '' }}">
+    <label for="latest_departure_time">Latest departure time</label>
+    <input type="time" id="latest_departure_time" name="latest_departure_time"
+           value="{{ form.latest_departure_time if form else '' }}">
+  </fieldset>
+
+  <label for="seats_needed">Seats needed</label>
+  <input type="number" id="seats_needed" name="seats_needed" min="1" value="{{ form.seats_needed if form else 1 }}">
+
+  <label for="contact">Contact (phone/WhatsApp) -- only shared with your match</label>
+  <input type="text" id="contact" name="contact" required value="{{ form.contact if form else '' }}">
+
+  <button type="submit">Post request</button>
+</form>
+<script src="/static/app.js"></script>
+{% endblock %}
