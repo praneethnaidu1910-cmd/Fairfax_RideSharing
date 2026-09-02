@@ -10,9 +10,11 @@ except the two matched parties gets to see (task 7 is the exception path).
 from datetime import date, datetime, time, timedelta
 from typing import Union
 
+from app.matching.scoring import is_expired
 from app.schemas import (
     OneOffSchedule,
     RecurringSchedule,
+    RequestStatus,
     RideRequest,
     RideRequestPublic,
 )
@@ -48,7 +50,19 @@ def fuzz_schedule(
 
 def to_public(request: RideRequest) -> RideRequestPublic:
     """The coarse/fuzzed view of a request -- what GET /requests returns for
-    everyone. Never touches request.contact or the precise Location."""
+    everyone. Never touches request.contact or the precise Location.
+
+    `status` is computed, not read straight off the stored request: an
+    OPEN request whose one-off window has already passed (TASKS.md #14,
+    scoring.is_expired) displays as `expired` here even though nothing
+    ever flips its persisted status -- SCOPE.md's "live status... without
+    the poster manually re-posting" only needs this to be true of what a
+    reader sees, not a stored value, so there's no background job/cron
+    needed to make it happen.
+    """
+    status = request.status
+    if status == RequestStatus.OPEN and is_expired(request):
+        status = RequestStatus.EXPIRED
     return RideRequestPublic(
         id=request.id,
         rider_id=request.rider_id,
@@ -56,6 +70,6 @@ def to_public(request: RideRequest) -> RideRequestPublic:
         destination_area=request.destination.coarse_cell(),
         schedule=fuzz_schedule(request.schedule),
         seats_needed=request.seats_needed,
-        status=request.status,
+        status=status,
         posted_at=request.posted_at,
     )

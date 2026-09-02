@@ -77,6 +77,24 @@ def capacity_fits(a: RideRequest, b: RideRequest, vehicle_capacity: int) -> bool
     return a.seats_needed + b.seats_needed <= vehicle_capacity
 
 
+def is_expired(request: RideRequest, now: Optional[datetime] = None) -> bool:
+    """Whether `request`'s departure window has fully passed (SCOPE.md's
+    "live status: open / matched / expired" -- TASKS.md #14).
+
+    Only a OneOffSchedule has a single point in time it can be judged
+    against (its own latest_departure); a RecurringSchedule is a standing
+    weekly pattern with no stated end date in SCOPE.md, so it never
+    expires here -- treating "today's occurrence already happened" as
+    request-level expiry would be wrong, since tomorrow's occurrence
+    hasn't. Whether/how a recurring request should ever expire is an open
+    product question, not something to guess at (see TASKS.md #14's note).
+    """
+    if not isinstance(request.schedule, OneOffSchedule):
+        return False
+    now = now or datetime.utcnow()
+    return now > request.schedule.latest_departure
+
+
 def compatibility_score(
     a: RideRequest,
     b: RideRequest,

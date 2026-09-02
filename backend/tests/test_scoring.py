@@ -5,11 +5,12 @@ from app.matching.scoring import (
     compatibility_score,
     directional_score,
     expand_schedule,
+    is_expired,
     spatial_score,
     temporal_score,
 )
 from app.sample_data import SAMPLE_REQUESTS
-from app.schemas import OneOffSchedule, RecurringSchedule
+from app.schemas import Location, OneOffSchedule, RecurringSchedule, RideRequest
 
 # rider-1 (Fairfax -> Aldie) / rider-7 (close origin, same Aldie
 # destination, overlapping window): the "known-good" pair.
@@ -57,6 +58,39 @@ def test_known_good_pair_scores_higher_than_known_bad_pair():
     good_score = compatibility_score(RIDER_1, RIDER_7, RIDER_1.schedule, RIDER_7.schedule)
     bad_score = compatibility_score(RIDER_1, RIDER_2, RIDER_1.schedule, RIDER_2.schedule)
     assert good_score > bad_score
+
+
+def _make_request(schedule) -> RideRequest:
+    point = Location(lat=38.8462, lng=-77.3064)
+    return RideRequest(
+        rider_id="rider-x", origin=point, destination=point, schedule=schedule, contact="555-0199"
+    )
+
+
+def test_is_expired_true_once_latest_departure_has_passed():
+    now = datetime.utcnow()
+    schedule = OneOffSchedule(
+        earliest_departure=now - timedelta(hours=2), latest_departure=now - timedelta(hours=1)
+    )
+    assert is_expired(_make_request(schedule), now=now)
+
+
+def test_is_expired_false_while_window_is_still_upcoming():
+    now = datetime.utcnow()
+    schedule = OneOffSchedule(
+        earliest_departure=now + timedelta(minutes=10), latest_departure=now + timedelta(minutes=40)
+    )
+    assert not is_expired(_make_request(schedule), now=now)
+
+
+def test_is_expired_always_false_for_recurring_schedule():
+    # A standing weekly pattern has no single point in time to judge
+    # "expired" against -- TASKS.md #14's documented open question.
+    now = datetime.utcnow()
+    schedule = RecurringSchedule(
+        weekdays=[0, 1, 2, 3, 4], earliest_departure_time=time(0, 0), latest_departure_time=time(0, 1)
+    )
+    assert not is_expired(_make_request(schedule), now=now)
 
 
 def test_expand_schedule_one_off_returns_itself():

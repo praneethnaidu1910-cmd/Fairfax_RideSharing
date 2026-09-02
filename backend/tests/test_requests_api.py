@@ -165,3 +165,22 @@ def test_get_unknown_request_id_returns_404():
         response = client.get(f"/requests/{uuid4()}")
 
     assert response.status_code == 404
+
+
+def test_open_request_past_its_window_reports_expired_status():
+    # TASKS.md #14: nothing ever flips this request's persisted status --
+    # both read paths compute "expired" live from the (already-past)
+    # window instead.
+    payload = _one_off_payload(
+        "rider-expired-test", FAIRFAX, ALDIE, -120, 30, contact="555-0404"
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        detail = client.get(f"/requests/{created['id']}")
+        listing = client.get("/requests")
+
+    assert created["status"] == "expired"
+    assert detail.json()["status"] == "expired"
+    entry = {r["id"]: r for r in listing.json()}[created["id"]]
+    assert entry["status"] == "expired"

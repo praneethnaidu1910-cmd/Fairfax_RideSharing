@@ -88,6 +88,59 @@ def test_match_batch_excludes_opposite_direction_pair():
     assert request_b.status == RequestStatus.OPEN
 
 
+def test_match_batch_skips_an_expired_open_request():
+    # rider-1/rider-7 are the known-good pair (test_match_batch_matches_
+    # close_same_direction_pair above); backdating rider-1's window into
+    # the past should pull it out of matching entirely (TASKS.md #14)
+    # rather than letting it win the slot a still-live request could use.
+    requests = _sample_copy()
+    rider_1 = requests[0]
+    rider_7_id = requests[6].id
+    now = datetime.utcnow()
+    rider_1.schedule = OneOffSchedule(
+        earliest_departure=now - timedelta(hours=2), latest_departure=now - timedelta(hours=1)
+    )
+
+    matches = MatchingEngine().match_batch(requests)
+
+    matched_ids = {rid for m in matches for rid in m.request_ids}
+    assert rider_1.id not in matched_ids
+    assert rider_7_id not in matched_ids
+    assert rider_1.status == RequestStatus.OPEN  # never flipped, just excluded
+
+
+def test_on_new_request_does_not_match_or_pool_an_expired_incoming_request():
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    rider_1 = by_rider["rider-1"]
+    now = datetime.utcnow()
+    rider_1.schedule = OneOffSchedule(
+        earliest_departure=now - timedelta(hours=2), latest_departure=now - timedelta(hours=1)
+    )
+
+    matches = engine.on_new_request(rider_1)
+
+    assert matches == []
+    assert rider_1 not in engine._unmatched
+
+
+def test_on_new_request_skips_a_candidate_that_expired_while_pooled():
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    rider_1 = by_rider["rider-1"]
+    now = datetime.utcnow()
+    rider_1.schedule = OneOffSchedule(
+        earliest_departure=now - timedelta(hours=2), latest_departure=now - timedelta(hours=1)
+    )
+    engine._unmatched.append(rider_1)
+
+    matches = engine.on_new_request(by_rider["rider-7"])
+
+    assert matches == []
+    assert by_rider["rider-7"] in engine._unmatched
+    assert rider_1.status == RequestStatus.OPEN
+
+
 def test_on_new_request_matches_close_pair_scoring_only_bucketed_candidates(monkeypatch):
     # Seed a pool of several requests, most nowhere near rider-7's corridor
     # -- bucketing should keep on_new_request from scoring against most of

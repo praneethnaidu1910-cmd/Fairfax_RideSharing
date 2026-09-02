@@ -50,6 +50,45 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 14. Live status -- auto-expire past-window one-off requests (`825cbb3`)
+- SCOPE.md's MVP item 4 ("live status: open / matched / expired... without
+  the poster manually re-posting") named `expired` as a real state back in
+  task 1, and `RequestStatus.EXPIRED` has existed in `app/schemas.py` since
+  then, but nothing ever set it -- a one-off request whose window had
+  fully passed just sat there showing `open` forever. `app/matching/
+  scoring.py`'s new `is_expired(request, now=None)` is the one place that
+  answers "has this window passed," and both read paths use it: `app/
+  privacy.py`'s `to_public()` reports `expired` for a still-OPEN request
+  whose window is behind `now` (computed at read time, not written back to
+  the store -- no cron/background job needed, matching how `app/matching/
+  engine.py` already only cares about the pool it holds in memory), and
+  the engine (`match_batch()`/`on_new_request()`) skips an expired request
+  or candidate rather than matching it, so an unread stale post can't
+  quietly win a match slot a still-live request could use.
+- Deliberately scoped to `OneOffSchedule` only. A `RecurringSchedule` is a
+  standing weekly pattern with no end date SCOPE.md ever specifies -- "the
+  Monday occurrence already happened" doesn't mean the whole recurring
+  request should read as expired, since Tuesday's occurrence hasn't. Left
+  `is_expired()` returning `False` for every recurring request rather than
+  guessing at semantics (does a recurring request ever expire on its own,
+  or only get cancelled by its poster -- and there's no cancel endpoint
+  either). **Decision needed before this is closed for recurring
+  requests**: what "expired" should mean for a standing pattern, and
+  whether a cancel/pause action is the real fix here instead.
+- Tests: `tests/test_scoring.py` covers `is_expired()` directly (past
+  window true, upcoming window false, always false for recurring).
+  `tests/test_engine.py` proves an expired request is excluded from
+  `match_batch()` (never wins the slot the sample dataset's known-good
+  rider-1/rider-7 pair would otherwise fill), and that `on_new_request()`
+  neither matches nor pools an expired incoming request, nor matches
+  against a pool candidate that expired while waiting.
+  `tests/test_requests_api.py`'s new test posts a request with an
+  already-past window and confirms both `POST /requests`' own response and
+  a follow-up `GET /requests/{id}` and `GET /requests` all report
+  `"status": "expired"`, with nothing in the store ever writing that value
+  -- the actual HTTP-level acceptance check for SCOPE.md's "without the
+  poster manually re-posting."
+
 ### 12. Minimal frontend — live matches + reveal (`c04feed`)
 - `GET /mine/{request_id}` (`app/web.py`) is the rider's own "waiting for a
   match" page -- lands there straight off `POST /new`'s redirect (changed

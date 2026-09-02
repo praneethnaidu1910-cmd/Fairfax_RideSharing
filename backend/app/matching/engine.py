@@ -22,6 +22,7 @@ from app.matching.scoring import (
     compatibility_score,
     directional_score,
     expand_schedule,
+    is_expired,
 )
 from app.schemas import MatchGroup, RequestStatus, RideRequest
 
@@ -79,7 +80,13 @@ class MatchingEngine:
         for each request wins, and both requests drop out of consideration
         for the rest of this pass. Flips both requests' `status` to
         `matched` in place -- the only place a batch run does that."""
-        open_requests = [r for r in requests if r.status == RequestStatus.OPEN]
+        # A still-OPEN request whose one-off window has already passed
+        # (TASKS.md #14, scoring.is_expired) is unmatchable -- it displays
+        # as `expired` (app/privacy.py's to_public()) and shouldn't win a
+        # slot a still-live request could use.
+        open_requests = [
+            r for r in requests if r.status == RequestStatus.OPEN and not is_expired(r)
+        ]
         by_id = {r.id: r for r in open_requests}
         candidates = candidate_groups(open_requests)
 
@@ -146,7 +153,11 @@ class MatchingEngine:
         self._unmatched; otherwise `request` joins the pool for future
         calls to match against.
         """
-        if request.status != RequestStatus.OPEN:
+        # Same expiry gate as match_batch(): an already-expired request
+        # (TASKS.md #14) never joins the pool or wins a match, and an
+        # existing pool member that's since expired while waiting is
+        # skipped as a candidate rather than matched against.
+        if request.status != RequestStatus.OPEN or is_expired(request):
             return []
 
         origin_index, destination_index = build_indexes(self._unmatched)
@@ -156,6 +167,8 @@ class MatchingEngine:
         best_score: Optional[float] = None
         best_candidate: Optional[RideRequest] = None
         for candidate in candidates:
+            if is_expired(candidate):
+                continue
             if not capacity_fits(request, candidate, self.vehicle_capacity):
                 continue
             if directional_score(request, candidate) < MIN_DIRECTIONAL_SCORE:
