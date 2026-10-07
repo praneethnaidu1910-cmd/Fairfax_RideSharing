@@ -50,7 +50,7 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
-### 14. Live status -- auto-expire past-window one-off requests (`825cbb3`)
+### 14. Live status -- auto-expire past-window one-off requests (`64af644`)
 - SCOPE.md's MVP item 4 ("live status: open / matched / expired... without
   the poster manually re-posting") named `expired` as a real state back in
   task 1, and `RequestStatus.EXPIRED` has existed in `app/schemas.py` since
@@ -89,7 +89,7 @@ that works" to "something a real person can actually open and use."
   -- the actual HTTP-level acceptance check for SCOPE.md's "without the
   poster manually re-posting."
 
-### 12. Minimal frontend — live matches + reveal (`c04feed`)
+### 12. Minimal frontend — live matches + reveal (`ce2b9bf`)
 - `GET /mine/{request_id}` (`app/web.py`) is the rider's own "waiting for a
   match" page -- lands there straight off `POST /new`'s redirect (changed
   from redirecting to `/browse`, since this page is what needs to know
@@ -133,7 +133,7 @@ that works" to "something a real person can actually open and use."
   to reproduce this by hand are in the root README's new "Web frontend"
   section.
 
-### 11. Minimal frontend — submit + browse (`81827b3`)
+### 11. Minimal frontend — submit + browse (`2b5fac9`)
 - `app/web.py` adds `GET`/`POST /new` (the submission form) and
   `GET /browse` (the open-requests list), served as plain Jinja2 templates
   (`app/templates/`) plus one vanilla-JS file (`app/static/app.js`) --
@@ -168,7 +168,7 @@ that works" to "something a real person can actually open and use."
   `Jinja2Templates` and FastAPI's `Form()` parsing both need them and
   neither came in transitively already.
 
-### 10. Geocoding — informal place names to coordinates (`5e6f523`)
+### 10. Geocoding — informal place names to coordinates (`cce8747`)
 - `app/geocoding.py`'s `geocode_place()` wraps Nominatim's `/search`
   endpoint: a `viewbox` covering every town SCOPE.md names (Fairfax,
   Ashburn, Herndon, Chantilly, Reston, Aldie, Manassas, Sterling, South
@@ -209,7 +209,7 @@ that works" to "something a real person can actually open and use."
   call this fully trustworthy. Steps are in the README's new "Geocoding"
   section.
 
-### 1. Data models + sample dataset (`1329205300f1b225c1393eb17fbc848dca0e1861`)
+### 1. Data models + sample dataset (`46966dd`)
 - `RideRequest` now has a `schedule: OneOffSchedule | RecurringSchedule`
   union (one or the other, never both), `status` (open/matched/expired,
   default open), and a required `contact` field. `Location.coarse_cell()`
@@ -222,7 +222,7 @@ that works" to "something a real person can actually open and use."
 - Excluding `contact` from pre-match API responses is left to task 6
   (response-shaping), per that task's own acceptance criteria.
 
-### 2. Spatial bucketing (`66bdb57736584d7cfe3e6c2b394490ad5031558e`)
+### 2. Spatial bucketing (`9c0670d`)
 - `app/matching/bucketing.py` builds origin/destination H3 cell indexes
   once (`build_indexes()`) and reuses them for every candidate lookup
   (`candidates_for()` / `candidate_groups()`), so this stays a
@@ -241,7 +241,7 @@ that works" to "something a real person can actually open and use."
   directional-scoring job, not bucketing's -- bucketing only prunes on
   distance.
 
-### 3. Compatibility scoring (`cbc6655c5d03e476bad0f70a7154733f9692ef28`)
+### 3. Compatibility scoring (`1158014`)
 - `app/matching/scoring.py` implements the four dimensions from
   docs/MATCHING_ALGORITHM.md: `spatial_score()` and `directional_score()`
   (haversine distance + bearing cosine similarity, both new in
@@ -259,7 +259,7 @@ that works" to "something a real person can actually open and use."
   window) score higher via `compatibility_score()` than rider-1/rider-2
   (opposite direction) -- the known-good-vs-known-bad acceptance test.
 
-### 4. Greedy matching engine (`10a92dd`)
+### 4. Greedy matching engine (`6e36739`)
 - `app/matching/engine.py`'s `MatchingEngine.match_batch()` scores every
   bucketed candidate pair once (bucketing #2 + scoring #3), sorts
   descending, and assigns greedily with no backtracking, per the design
@@ -282,7 +282,7 @@ that works" to "something a real person can actually open and use."
 - A successful match flips both requests' `status` to `matched` in place;
   everything else stays `open` (verified against the full sample dataset).
 
-### 5. Incremental matching + in-process pub/sub (`7f8cb1f`)
+### 5. Incremental matching + in-process pub/sub (`f236525`)
 - `MatchingEngine.on_new_request()` is match_batch()'s incremental sibling:
   it builds bucketing indexes over just `self._unmatched` (the running
   pool, not every open request) and scores `request` only against its own
@@ -304,7 +304,7 @@ that works" to "something a real person can actually open and use."
   (`on_new_request` called twice, matching on the second call); and an
   `asyncio`-driven test exercising `submit()`/`run_forever()` end to end.
 
-### 6. Structured intake + privacy-safe read API (`4e645ef`)
+### 6. Structured intake + privacy-safe read API (`b22259a`)
 - `app/router.py` adds `POST /requests` (structured `RideRequestCreate`
   body, no free text -- task 1's form fields directly) and `GET /requests`
   (coarse area + fuzzed window only). `WS /matches` streams each
@@ -343,7 +343,7 @@ that works" to "something a real person can actually open and use."
   just in the return value of some function. Manual curl/websocket smoke
   test documented in the root README.
 
-### 7. Post-match reveal (`0258de7`)
+### 7. Post-match reveal (`bee4d17`)
 - `RideRequest` gets a new `matched_with: Optional[UUID]` field, set by
   `MatchingEngine` (both `match_batch()` and `on_new_request()`) right
   alongside the existing `status = MATCHED` flip -- so a matched pair's
@@ -367,7 +367,7 @@ that works" to "something a real person can actually open and use."
   the redacted view, an unmatched request's own `GET` is redacted too, and
   an unknown id 404s.
 
-### 8. Simulator + minimal live view (`8188ce5`)
+### 8. Simulator + minimal live view (`033f6cf`)
 - `backend/simulate.py` replays `app/sample_data.py`'s `SAMPLE_REQUESTS`
   against a *running* server (`POST /requests`, staggered across a
   compressed `--seconds` window, default 15s) while a second `asyncio`
@@ -398,7 +398,7 @@ that works" to "something a real person can actually open and use."
   `simulate.py` imports it directly rather than relying on it coming along
   transitively through `uvicorn[standard]`.
 
-### 9. Persistence: PostgreSQL-backed request store (`f296292`)
+### 9. Persistence: PostgreSQL-backed request store (`7f26a0d`)
 - `app/store.py`'s `RequestStore` is now Postgres-backed: `app/models.py`
   has the SQLAlchemy `RideRequestORM` table, `app/db.py`'s
   `make_session_factory()` builds a session factory from `DATABASE_URL`
