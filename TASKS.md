@@ -48,6 +48,69 @@ that works" to "something a real person can actually open and use."
 - **Acceptance**: the app is reachable at a real URL from a phone or
   laptop that isn't the machine running it.
 
+### 15. Recurring-request lifecycle: cancel/withdraw + decide "expired" semantics
+- Resolves the decision task 14 left open: `is_expired()` always returns
+  `False` for a `RecurringSchedule` today, and neither schedule type has a
+  way for a poster to say "stop matching me." Decision to make: does a
+  recurring request ever expire on its own (and if so, per-occurrence or
+  the whole standing request), or is a poster-initiated cancel/pause the
+  only way a recurring request stops being matchable? Whatever the
+  decision lands on, a one-off request needs a real cancel path too --
+  right now there's no way to withdraw a posted request before it
+  matches, which is the same gap SCOPE.md's "live status" item implies
+  shouldn't exist.
+- **Acceptance**: `POST /requests/{id}/cancel` (or equivalent) sets a new
+  `cancelled` status (or reuses `expired`, if that's the decision) and the
+  matching engine stops considering that request immediately -- tested by
+  proving a cancelled request can't win a match slot. The recurring
+  semantics decision gets written down (docs/MATCHING_ALGORITHM.md or
+  here), not left implicit in code.
+- If the decision itself isn't obvious from SCOPE.md, leave a specific
+  note here instead of guessing, same as task 14 did.
+
+### 16. Minimal abuse/harassment reporting
+- SCOPE.md's "part that isn't just an engineering decision" names "some
+  way to handle harassment/abuse reports" as needed before this goes live
+  to real people -- nothing exists for this yet.
+- **Acceptance**: a way for a rider to report a problem with a specific
+  request/counterpart (e.g. `POST /requests/{id}/report` with a reason),
+  stored durably (not just logged to stdout), visible nowhere publicly.
+  No moderation workflow or admin UI needs building yet -- the minimal
+  scope here is just making sure a report isn't lost.
+
+### 17. Data retention pass for matched/expired requests
+- SCOPE.md flags "real data protection for real location data" as a real
+  requirement. Right now a matched or expired request's precise location
+  and contact info sit in Postgres indefinitely with no cleanup.
+- **Acceptance**: a documented retention rule (e.g. precise
+  location/contact anonymized or deleted N days after match/expiry/
+  cancellation) with a test proving the anonymization/deletion actually
+  runs, not just a comment saying it should.
+
+### 18. Deployment prep (the non-account parts of task 13)
+- Task 13 itself is off-limits to automated runs (hosting account,
+  billing), but the app isn't deploy-ready independent of that either:
+  no health-check endpoint, no container image, and CORS/production
+  config is whatever FastAPI's defaults happen to be.
+- **Acceptance**: a `GET /healthz` (or similar) route a hosting platform
+  can poll, a `Dockerfile` that builds and runs the app against an
+  external `DATABASE_URL`, and production-safe defaults (CORS
+  restricted, debug off) documented in a new README "Deploying" section
+  alongside the existing "Running locally" one. None of this creates an
+  account or spends money -- once it's done, task 13 is just "sign up
+  for hosting and point it at this."
+
+### 19. Legal research memo: ride-cost-splitting vs. carpooling in Virginia (manual/research only -- not for automated code-writing runs)
+- SCOPE.md names this open question explicitly and says it's "worth
+  actually researching before this goes live... not something to
+  resolve by assumption in this file." This is a legal-risk judgment
+  call, not a coding task -- flagging it the same way task 13 is
+  flagged, so an automated run doesn't try to resolve it by writing code
+  or asserting a legal conclusion on my behalf.
+- **Acceptance**: this is mine to look into by hand (with a real
+  lawyer's input if it comes to that), not something a scheduled run
+  should check off.
+
 ## Done
 
 ### 14. Live status -- auto-expire past-window one-off requests (`64af644`)
