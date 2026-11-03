@@ -48,15 +48,6 @@ that works" to "something a real person can actually open and use."
 - **Acceptance**: the app is reachable at a real URL from a phone or
   laptop that isn't the machine running it.
 
-### 17. Data retention pass for matched/expired requests
-- SCOPE.md flags "real data protection for real location data" as a real
-  requirement. Right now a matched or expired request's precise location
-  and contact info sit in Postgres indefinitely with no cleanup.
-- **Acceptance**: a documented retention rule (e.g. precise
-  location/contact anonymized or deleted N days after match/expiry/
-  cancellation) with a test proving the anonymization/deletion actually
-  runs, not just a comment saying it should.
-
 ### 18. Deployment prep (the non-account parts of task 13)
 - Task 13 itself is off-limits to automated runs (hosting account,
   billing), but the app isn't deploy-ready independent of that either:
@@ -82,6 +73,50 @@ that works" to "something a real person can actually open and use."
   should check off.
 
 ## Done
+
+### 17. Data retention pass for matched/cancelled/expired requests (`e62270a`)
+- SCOPE.md flags "real data protection for real location data" as a real
+  requirement -- a matched, cancelled, or expired request's precise
+  location and contact info used to just sit in Postgres forever with no
+  cleanup. Decided on `RETENTION_DAYS = 30` (`app/retention.py`) -- SCOPE.md
+  doesn't name a specific number, so this is my own reasonable
+  data-minimization default, worth revisiting if a real policy is ever
+  set.
+- `app/retention.py`'s `terminal_at()` is the one place that decides *when*
+  a request became retention-eligible: for `matched`/`cancelled` it's the
+  new `status_changed_at` field (`app/schemas.py`, written by
+  `MatchingEngine` on a match and by `POST /requests/{id}/cancel` on a
+  cancel); for a still-`open`-but-expired one-off request (TASKS.md #14),
+  it's that window's own `latest_departure` -- a `RecurringSchedule` never
+  reaches this path since `is_expired()` already always returns `False`
+  for one, matching docs/MATCHING_ALGORITHM.md's existing lifecycle
+  write-up (now updated to mention this pass). `is_due_for_anonymization()`
+  is just "has `RETENTION_DAYS` passed since then, and not already done."
+- The actual mutation is `RequestStore.anonymize_stale()` (`app/store.py`):
+  overwrites a due row's precise origin/destination with its own
+  neighborhood-level H3 cell center (`app/geo.py`'s new `cell_center()` --
+  same granularity every other user already sees pre-match, so this is
+  genuinely "anonymized," not just hidden) and `contact` with an empty
+  string, then stamps a new `anonymized_at` so a later run skips it
+  instead of reprocessing. Only scans not-yet-anonymized rows, so repeated
+  calls stay cheap.
+- Deliberately didn't wire this to any in-app scheduler -- there's no
+  cron/background-job infra in this app on purpose (TASKS.md #14's own
+  reasoning), but unlike expiry, retention has to mutate stored rows, not
+  just compute a display value at read time, so it needs a real external
+  trigger. `scripts/anonymize_stale_requests.py` is that trigger -- run it
+  by hand or from an external cron once deployed (TASKS.md #13/#18);
+  documented in the root README's new "Data retention" section.
+- Tests (`tests/test_retention.py`): `terminal_at()`/`is_due_for_
+  anonymization()` covered directly (still-open/unexpired -> not due,
+  matched/cancelled past the window -> due, matched not yet past the
+  window -> not due, already-anonymized -> never due again). Then the
+  real acceptance check against Postgres: a long-matched request's row
+  actually gets its contact wiped and its precise point replaced (still
+  the same coarse cell, just not the original lat/lng) after
+  `anonymize_stale()` runs; a recently-matched or still-open request is
+  left untouched; and running it twice is idempotent (second run
+  anonymizes nothing new, keeps the original `anonymized_at`).
 
 ### 16. Minimal abuse/harassment reporting (`e439520`)
 - SCOPE.md's "part that isn't just an engineering decision" names "some

@@ -13,6 +13,7 @@ plus incremental matching (#5) below.
 """
 
 import asyncio
+from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
@@ -122,10 +123,16 @@ class MatchingEngine:
                 continue
             matched_ids.add(a_id)
             matched_ids.add(b_id)
+            matched_at = datetime.utcnow()
             by_id[a_id].status = RequestStatus.MATCHED
             by_id[b_id].status = RequestStatus.MATCHED
             by_id[a_id].matched_with = b_id
             by_id[b_id].matched_with = a_id
+            # TASKS.md #17 needs to know *when* a request became
+            # unmatchable, not just that it did -- this is what
+            # app.retention.terminal_at() reads for a MATCHED request.
+            by_id[a_id].status_changed_at = matched_at
+            by_id[b_id].status_changed_at = matched_at
             if self._store is not None:
                 self._store.save(by_id[a_id])
                 self._store.save(by_id[b_id])
@@ -186,10 +193,13 @@ class MatchingEngine:
             self._unmatched.append(request)
             return []
 
+        matched_at = datetime.utcnow()
         request.status = RequestStatus.MATCHED
         best_candidate.status = RequestStatus.MATCHED
         request.matched_with = best_candidate.id
         best_candidate.matched_with = request.id
+        request.status_changed_at = matched_at
+        best_candidate.status_changed_at = matched_at
         if self._store is not None:
             self._store.save(request)
             self._store.save(best_candidate)

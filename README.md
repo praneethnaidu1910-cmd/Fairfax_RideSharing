@@ -183,3 +183,27 @@ caught a real bug fixed alongside this: `app/static/app.js` was treating
 any failed `/geocode` call (including a transient 500) the same as a
 confirmed 404 "place not found," silently wiping out a field the rider had
 already filled in correctly.
+
+## Data retention
+
+SCOPE.md flags "real data protection for real location data" as a real
+requirement, not just an engineering nice-to-have -- so a matched,
+cancelled, or expired request's precise pickup/dropoff and contact info
+don't just sit in Postgres forever. `app/retention.py` defines the policy
+(`RETENTION_DAYS = 30`, counted from whichever of these happened:
+matched, cancelled, or -- for a one-off request only, see
+docs/MATCHING_ALGORITHM.md's "Request lifecycle" section -- its window
+expiring), and `RequestStore.anonymize_stale()` (`app/store.py`) is what
+actually overwrites the stale row: the exact origin/destination point
+becomes its own neighborhood-level H3 cell center (the same granularity
+every other user already sees pre-match) and `contact` becomes an empty
+string. Already-anonymized rows are skipped on every later run.
+
+This doesn't run on its own -- there's no in-app scheduler (same posture
+as TASKS.md #14's expiry, except this one has to mutate stored rows, so
+it needs a real external trigger). Run it periodically once the app is
+deployed, e.g. a daily cron entry:
+
+```bash
+cd backend && python scripts/anonymize_stale_requests.py
+```

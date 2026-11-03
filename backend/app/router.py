@@ -6,6 +6,7 @@ client:` block in tests gets a fresh engine/store instead of leaking
 matched state between tests.
 """
 
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
@@ -101,6 +102,10 @@ def cancel_request(request_id: UUID, request: Request) -> RideRequestPublic:
         )
 
     target.status = RequestStatus.CANCELLED
+    # TASKS.md #17 reads this to know when a cancelled request became
+    # retention-eligible -- same role as the matched_at stamp engine.py
+    # writes on a match.
+    target.status_changed_at = datetime.utcnow()
     store.save(target)
     # store.get() above returned a fresh instance, not whatever object
     # engine._unmatched may hold for this id -- this is what actually

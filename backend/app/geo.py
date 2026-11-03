@@ -27,6 +27,16 @@ def h3_cell(lat: float, lng: float, resolution: int = COARSE_RESOLUTION) -> str:
     return h3.latlng_to_cell(lat, lng, resolution)
 
 
+def cell_center(cell: str) -> tuple[float, float]:
+    """Center point of an H3 cell -- (lat, lng). Used by TASKS.md #17's
+    retention pass to replace a stale request's precise point with its
+    own neighborhood-level center, the same granularity SCOPE.md already
+    treats as safe to show everyone pre-match, rather than keeping the
+    exact pickup/dropoff around indefinitely."""
+    lat, lng = h3.cell_to_latlng(cell)
+    return lat, lng
+
+
 def haversine_miles(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Great-circle distance in miles -- not a flat lat/lng approximation,
     which misranks pairs because a degree of longitude isn't a fixed

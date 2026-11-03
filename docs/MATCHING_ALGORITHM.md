@@ -100,6 +100,14 @@ Three ways a request stops being matchable, and they're not the same thing:
   and `expired`/already-`cancelled` have nothing left to cancel.
 - **Matched**: unaffected by either of the above once it happens.
 
+None of the three states above deletes a request's precise location or
+contact info on their own, though -- that's TASKS.md #17's job, a
+separate retention pass (`app/retention.py`, `RequestStore.
+anonymize_stale()`) that overwrites a request's precise point/contact
+once it's been matched, cancelled, or (one-off only) expired for
+`RETENTION_DAYS` (30, by default). See the root README's "Data
+retention" section.
+
 ## Real-time architecture
 
 Requests don't arrive in a batch — they trickle in over the evening. The

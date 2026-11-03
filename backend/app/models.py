@@ -32,6 +32,12 @@ class RideRequestORM(Base):
     status = Column(String, nullable=False, default="open")
     posted_at = Column(DateTime(timezone=False), nullable=False)
     matched_with = Column(PGUUID(as_uuid=True), nullable=True)
+    # TASKS.md #17 (data retention): when `status` last moved away from
+    # "open", and when anonymize_stale() last overwrote this row's precise
+    # location/contact. Both nullable/unset for an ordinary open, not-yet-
+    # anonymized request.
+    status_changed_at = Column(DateTime(timezone=False), nullable=True)
+    anonymized_at = Column(DateTime(timezone=False), nullable=True)
 
 
 class AbuseReportORM(Base):

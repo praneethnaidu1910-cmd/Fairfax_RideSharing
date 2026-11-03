@@ -74,6 +74,17 @@ class RideRequest(BaseModel):
     # other request this one is allowed to reveal precise location/contact
     # to (TASKS.md #7) -- None until matched.
     matched_with: Optional[UUID] = None
+    # When `status` last moved away from OPEN (set by MatchingEngine on a
+    # match, by POST /requests/{id}/cancel on a cancel). None for a request
+    # that's still open -- app/retention.py's terminal_at() is what turns
+    # this (plus EXPIRED's own computed timestamp) into "when did this
+    # become retention-eligible" (TASKS.md #17).
+    status_changed_at: Optional[datetime] = None
+    # Set once app/store.py's RequestStore.anonymize_stale() has overwritten
+    # this request's precise location/contact (TASKS.md #17) -- None means
+    # "not anonymized yet," and a request already anonymized is skipped on
+    # every later run rather than re-processed.
+    anonymized_at: Optional[datetime] = None
 
 
 class MatchGroup(BaseModel):

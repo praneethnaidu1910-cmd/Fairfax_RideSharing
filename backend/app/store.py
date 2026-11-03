@@ -12,12 +12,15 @@ resume mid-flight). GET /requests and GET /requests/{id} need every
 request regardless of status, durably, which is what this file provides.
 """
 
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
 from sqlalchemy.orm import sessionmaker
 
+from app.geo import cell_center
 from app.models import RideRequestORM
+from app.retention import is_due_for_anonymization
 from app.schemas import (
     Location,
     OneOffSchedule,
@@ -55,6 +58,8 @@ def _to_orm(request: RideRequest) -> RideRequestORM:
         status=request.status.value,
         posted_at=request.posted_at,
         matched_with=request.matched_with,
+        status_changed_at=request.status_changed_at,
+        anonymized_at=request.anonymized_at,
     )
 
 
@@ -70,6 +75,8 @@ def _from_orm(row: RideRequestORM) -> RideRequest:
         status=RequestStatus(row.status),
         posted_at=row.posted_at,
         matched_with=row.matched_with,
+        status_changed_at=row.status_changed_at,
+        anonymized_at=row.anonymized_at,
     )
 
 
@@ -94,6 +101,7 @@ class RequestStore:
             else:
                 row.status = request.status.value
                 row.matched_with = request.matched_with
+                row.status_changed_at = request.status_changed_at
             session.commit()
 
     def get(self, request_id: UUID) -> Optional[RideRequest]:
@@ -109,3 +117,47 @@ class RequestStore:
                 .all()
             )
             return [_from_orm(row) for row in rows]
+
+    def anonymize_stale(self, now: Optional[datetime] = None) -> int:
+        """Overwrites precise origin/destination and contact for every
+        request app.retention.is_due_for_anonymization() says is past its
+        retention window (TASKS.md #17) -- replaces the exact pickup/
+        dropoff point with its own neighborhood-level H3 cell center
+        (app.geo.cell_center(), the same granularity SCOPE.md already
+        treats as safe to show everyone pre-match) and `contact` with an
+        empty string, then stamps `anonymized_at` so a later run skips it
+        instead of re-processing it.
+
+        Only scans rows not yet anonymized -- cheap and idempotent to call
+        repeatedly. There's no in-app scheduler calling this on its own
+        (same "no cron/background job" posture as TASKS.md #14, except
+        this one mutates stored rows rather than just computing a display
+        value, so it needs a real external trigger -- see
+        scripts/anonymize_stale_requests.py and the README's "Data
+        retention" section for how to run it periodically).
+        """
+        now = now or datetime.utcnow()
+        anonymized_count = 0
+        with self._session_factory() as session:
+            rows = (
+                session.query(RideRequestORM)
+                .filter(RideRequestORM.anonymized_at.is_(None))
+                .all()
+            )
+            for row in rows:
+                request = _from_orm(row)
+                if not is_due_for_anonymization(request, now):
+                    continue
+                origin_lat, origin_lng = cell_center(request.origin.coarse_cell())
+                destination_lat, destination_lng = cell_center(
+                    request.destination.coarse_cell()
+                )
+                row.origin_lat = origin_lat
+                row.origin_lng = origin_lng
+                row.destination_lat = destination_lat
+                row.destination_lng = destination_lng
+                row.contact = ""
+                row.anonymized_at = now
+                anonymized_count += 1
+            session.commit()
+        return anonymized_count
