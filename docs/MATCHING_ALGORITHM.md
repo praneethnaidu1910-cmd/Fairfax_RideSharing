@@ -71,6 +71,35 @@ problem, not a simple pairing:
   against an optimal baseline" — that comparison is itself a good interview
   talking point (know the naive answer before reaching for the fancy one).
 
+## Request lifecycle: expiry vs. cancellation
+
+Three ways a request stops being matchable, and they're not the same thing:
+
+- **Expired** (TASKS.md #14): computed, never stored. A `OneOffSchedule`
+  whose `latest_departure` has passed reads as `expired` the moment
+  anything looks at it (`is_expired()`), with nothing ever writing that
+  back -- the engine just stops considering it. A `RecurringSchedule`
+  never expires this way: it's a standing weekly pattern with no end date
+  anywhere in SCOPE.md, so "today's occurrence already happened" doesn't
+  mean the whole request should go dark -- tomorrow's occurrence hasn't.
+  There's also no per-occurrence entity in this data model (a recurring
+  request is one `RideRequest`, not one row per weekday instance --
+  `expand_schedule()` only materializes occurrences transiently, for
+  scoring), so "expire just Monday's occurrence" isn't something the
+  current schema can represent without a real redesign; not attempted
+  here.
+- **Cancelled** (TASKS.md #15): the one real lifecycle event a recurring
+  request has. Since it never expires on its own, a poster's explicit
+  "stop matching me" (`POST /requests/{id}/cancel`) is the *only* way a
+  recurring request stops being matchable -- there's no implicit path.
+  The same endpoint also covers a one-off request that hasn't expired yet
+  but the poster wants to withdraw early (SCOPE.md's "live status" implies
+  this gap shouldn't exist, and nothing filled it before this task).
+  Cancelling only works on an `open` request -- a `matched` one already
+  revealed contact info to its counterpart and there's no unmatch flow,
+  and `expired`/already-`cancelled` have nothing left to cancel.
+- **Matched**: unaffected by either of the above once it happens.
+
 ## Real-time architecture
 
 Requests don't arrive in a batch — they trickle in over the evening. The

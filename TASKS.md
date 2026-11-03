@@ -48,26 +48,6 @@ that works" to "something a real person can actually open and use."
 - **Acceptance**: the app is reachable at a real URL from a phone or
   laptop that isn't the machine running it.
 
-### 15. Recurring-request lifecycle: cancel/withdraw + decide "expired" semantics
-- Resolves the decision task 14 left open: `is_expired()` always returns
-  `False` for a `RecurringSchedule` today, and neither schedule type has a
-  way for a poster to say "stop matching me." Decision to make: does a
-  recurring request ever expire on its own (and if so, per-occurrence or
-  the whole standing request), or is a poster-initiated cancel/pause the
-  only way a recurring request stops being matchable? Whatever the
-  decision lands on, a one-off request needs a real cancel path too --
-  right now there's no way to withdraw a posted request before it
-  matches, which is the same gap SCOPE.md's "live status" item implies
-  shouldn't exist.
-- **Acceptance**: `POST /requests/{id}/cancel` (or equivalent) sets a new
-  `cancelled` status (or reuses `expired`, if that's the decision) and the
-  matching engine stops considering that request immediately -- tested by
-  proving a cancelled request can't win a match slot. The recurring
-  semantics decision gets written down (docs/MATCHING_ALGORITHM.md or
-  here), not left implicit in code.
-- If the decision itself isn't obvious from SCOPE.md, leave a specific
-  note here instead of guessing, same as task 14 did.
-
 ### 16. Minimal abuse/harassment reporting
 - SCOPE.md's "part that isn't just an engineering decision" names "some
   way to handle harassment/abuse reports" as needed before this goes live
@@ -112,6 +92,50 @@ that works" to "something a real person can actually open and use."
   should check off.
 
 ## Done
+
+### 15. Recurring-request lifecycle: cancel/withdraw + decide "expired" semantics (`6aeef0c`)
+- The decision task 14 left open: I'm going with poster-initiated cancel
+  as the *only* way a recurring request stops being matchable -- it never
+  expires on its own. SCOPE.md never gives a recurring pattern an end
+  date, so "today's occurrence already happened" was never going to mean
+  "the whole standing request is dead" (tomorrow's occurrence hasn't).
+  Per-occurrence expiry isn't something the current schema can even
+  represent without a real redesign -- a recurring request is one
+  `RideRequest`, not one row per weekday occurrence; `expand_schedule()`
+  only materializes occurrences transiently, for scoring. Writing this
+  down for real in docs/MATCHING_ALGORITHM.md's new "Request lifecycle"
+  section instead of leaving it implicit, per this task's own acceptance
+  wording.
+- `POST /requests/{id}/cancel` (`app/router.py`) sets a new
+  `RequestStatus.CANCELLED` (`app/schemas.py`) -- deliberately a distinct
+  value from `EXPIRED`, since one is poster-initiated and stored, the
+  other is time-based and computed, never stored. Works on both schedule
+  shapes -- the endpoint only checks `status == OPEN`, doesn't care which
+  schedule type it's cancelling -- so this also fills the plain gap
+  SCOPE.md's "live status" item implies shouldn't exist: a one-off
+  request had no way to be withdrawn before it matched either.
+- Only an `open` request can be cancelled -- `matched`/`expired`/already-
+  `cancelled` all 409 rather than silently no-op, so a caller can tell a
+  real cancel happened from one that didn't. (A `matched` request already
+  revealed contact info to its counterpart; there's no unmatch flow to
+  build here.)
+- The real reason this needed engine code, not just a status flip:
+  `store.get()` hands the cancel endpoint a *fresh* `RideRequest`
+  instance built from the DB row, not the same Python object sitting in
+  `MatchingEngine._unmatched`'s pool -- flipping the fresh copy's status
+  alone wouldn't stop the still-pooled one from winning a later match.
+  `MatchingEngine.remove_from_pool(request_id)` (`app/matching/engine.py`)
+  is what actually drops it from that pool, called right after the status
+  flip.
+- Tests: `tests/test_engine.py` covers `remove_from_pool()` directly
+  (drops a pooled request by id, no-ops for an id never pooled) and this
+  task's own acceptance wording -- a request removed from the pool can't
+  win a later match that would otherwise have paired it (mirrors the
+  known-good rider-1/rider-7 pair, same as task 14's expiry test).
+  `tests/test_requests_api.py` covers the HTTP surface: a cancelled
+  request reads back `cancelled` and drops out of `GET /requests`'
+  open-only list, 404 on an unknown id, 409 on cancelling twice, and 409
+  on cancelling an already-matched request.
 
 ### 14. Live status -- auto-expire past-window one-off requests (`64af644`)
 - SCOPE.md's MVP item 4 ("live status: open / matched / expired... without

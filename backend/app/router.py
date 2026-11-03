@@ -13,7 +13,13 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisco
 
 from app.geocoding import PlaceNotFoundError, geocode_place
 from app.privacy import to_public
-from app.schemas import Location, RideRequest, RideRequestCreate, RideRequestPublic
+from app.schemas import (
+    Location,
+    RequestStatus,
+    RideRequest,
+    RideRequestCreate,
+    RideRequestPublic,
+)
 
 router = APIRouter()
 
@@ -67,6 +73,37 @@ def get_request(request_id: UUID, request: Request, viewer_request_id: Optional[
 
     if target.matched_with is not None and viewer_request_id == target.matched_with:
         return target
+    return to_public(target)
+
+
+@router.post("/requests/{request_id}/cancel", response_model=RideRequestPublic)
+def cancel_request(request_id: UUID, request: Request) -> RideRequestPublic:
+    """Poster-initiated withdrawal (TASKS.md #15) -- SCOPE.md's "live
+    status" item implies a way to stop being matched before a window
+    passes or a match happens, and nothing provided that until now.
+
+    Only an OPEN request can be cancelled: a MATCHED request already
+    revealed contact info to its counterpart (there's no unmatch flow), an
+    EXPIRED one is already unmatchable, and a second cancel on an
+    already-CANCELLED one has nothing left to do. All three 409 rather
+    than silently no-op, so a caller can tell a real cancel happened from
+    one that didn't.
+    """
+    store = request.app.state.store
+    target = store.get(request_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="request not found")
+    if target.status != RequestStatus.OPEN:
+        raise HTTPException(
+            status_code=409, detail=f"cannot cancel a request with status '{target.status.value}'"
+        )
+
+    target.status = RequestStatus.CANCELLED
+    store.save(target)
+    # store.get() above returned a fresh instance, not whatever object
+    # engine._unmatched may hold for this id -- this is what actually
+    # stops it from winning a future match, not the status flip alone.
+    request.app.state.engine.remove_from_pool(target.id)
     return to_public(target)
 
 

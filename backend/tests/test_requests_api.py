@@ -167,6 +167,65 @@ def test_get_unknown_request_id_returns_404():
     assert response.status_code == 404
 
 
+def test_cancel_open_request_sets_cancelled_status_and_drops_it_from_the_open_list():
+    # A lone request (no compatible pair in this payload) so it stays OPEN
+    # and pooled, not MATCHED, until cancelled.
+    payload = _one_off_payload(
+        "rider-cancel-test", (38.9, -77.6), (38.7, -77.0), 180, 30, contact="555-0501"
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        cancel_response = client.post(f"/requests/{created['id']}/cancel")
+        detail = client.get(f"/requests/{created['id']}")
+        listing = client.get("/requests")
+
+    assert cancel_response.status_code == 200
+    cancel_body = cancel_response.json()
+    assert cancel_body["status"] == "cancelled"
+    assert "contact" not in cancel_body
+    assert detail.json()["status"] == "cancelled"
+    assert created["id"] not in {r["id"] for r in listing.json()}
+
+
+def test_cancel_unknown_request_id_returns_404():
+    with TestClient(app) as client:
+        response = client.post(f"/requests/{uuid4()}/cancel")
+
+    assert response.status_code == 404
+
+
+def test_cancel_already_cancelled_request_returns_409():
+    payload = _one_off_payload(
+        "rider-double-cancel", (38.9, -77.6), (38.7, -77.0), 180, 30, contact="555-0502"
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        first_cancel = client.post(f"/requests/{created['id']}/cancel")
+        second_cancel = client.post(f"/requests/{created['id']}/cancel")
+
+    assert first_cancel.status_code == 200
+    assert second_cancel.status_code == 409
+
+
+def test_cancel_a_matched_request_returns_409():
+    payload_a = _one_off_payload("rider-cancel-matched-a", FAIRFAX, ALDIE, 120, 30, contact="555-0503")
+    payload_b = _one_off_payload(
+        "rider-cancel-matched-b", NEAR_FAIRFAX, ALDIE, 125, 30, contact="555-0504"
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/matches") as websocket:
+            a = client.post("/requests", json=payload_a).json()
+            client.post("/requests", json=payload_b)
+            websocket.receive_json()  # block until the two are actually matched
+
+        response = client.post(f"/requests/{a['id']}/cancel")
+
+    assert response.status_code == 409
+
+
 def test_open_request_past_its_window_reports_expired_status():
     # TASKS.md #14: nothing ever flips this request's persisted status --
     # both read paths compute "expired" live from the (already-past)

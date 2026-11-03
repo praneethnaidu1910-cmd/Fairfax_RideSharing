@@ -207,6 +207,16 @@ class MatchingEngine:
         puts it on `incoming` for run_forever() to pick up."""
         await self.incoming.put(request)
 
+    def remove_from_pool(self, request_id: UUID) -> None:
+        """Drops `request_id` from self._unmatched if it's sitting there
+        (TASKS.md #15's cancel path): store.get() hands the cancel endpoint
+        a fresh RideRequest instance built from the DB row, not the same
+        object this pool holds, so flipping that fresh copy's status alone
+        wouldn't stop a still-pooled request from winning a future match --
+        this is what actually does. A no-op if the request was never
+        pooled (already matched, or still sitting in `incoming`)."""
+        self._unmatched = [r for r in self._unmatched if r.id != request_id]
+
     def subscribe(self) -> "asyncio.Queue[MatchGroup]":
         """Registers a new queue that receives a copy of every future match
         alongside the shared `self.matches` queue -- call this once per

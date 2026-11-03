@@ -141,6 +141,44 @@ def test_on_new_request_skips_a_candidate_that_expired_while_pooled():
     assert rider_1.status == RequestStatus.OPEN
 
 
+def test_remove_from_pool_drops_a_pooled_request_by_id():
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    engine._unmatched.append(by_rider["rider-1"])
+
+    engine.remove_from_pool(by_rider["rider-1"].id)
+
+    assert engine._unmatched == []
+
+
+def test_remove_from_pool_is_a_noop_for_an_id_never_pooled():
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    engine._unmatched.append(by_rider["rider-1"])
+
+    engine.remove_from_pool(by_rider["rider-7"].id)  # never pooled
+
+    assert engine._unmatched == [by_rider["rider-1"]]
+
+
+def test_a_cancelled_pooled_request_cannot_win_a_later_match_slot():
+    # TASKS.md #15's own acceptance wording: prove a cancelled request
+    # can't win a match slot. remove_from_pool() is what POST
+    # /requests/{id}/cancel calls -- rider-1 sitting in the pool,
+    # "cancelled" (removed), then rider-7 arrives and would have matched
+    # rider-1 (the known-good pair) but now has nothing to match.
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    engine._unmatched.append(by_rider["rider-1"])
+
+    engine.remove_from_pool(by_rider["rider-1"].id)
+    matches = engine.on_new_request(by_rider["rider-7"])
+
+    assert matches == []
+    assert by_rider["rider-7"] in engine._unmatched
+    assert by_rider["rider-1"].status == RequestStatus.OPEN  # never touched by remove_from_pool
+
+
 def test_on_new_request_matches_close_pair_scoring_only_bucketed_candidates(monkeypatch):
     # Seed a pool of several requests, most nowhere near rider-7's corridor
     # -- bucketing should keep on_new_request from scoring against most of

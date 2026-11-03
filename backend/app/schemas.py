@@ -51,6 +51,10 @@ class RequestStatus(str, Enum):
     OPEN = "open"
     MATCHED = "matched"
     EXPIRED = "expired"
+    # Poster-initiated withdrawal (TASKS.md #15) -- distinct from EXPIRED,
+    # which is time-based and computed, never stored. CANCELLED is written
+    # once, directly, by POST /requests/{id}/cancel.
+    CANCELLED = "cancelled"
 
 
 class RideRequest(BaseModel):
