@@ -48,16 +48,6 @@ that works" to "something a real person can actually open and use."
 - **Acceptance**: the app is reachable at a real URL from a phone or
   laptop that isn't the machine running it.
 
-### 16. Minimal abuse/harassment reporting
-- SCOPE.md's "part that isn't just an engineering decision" names "some
-  way to handle harassment/abuse reports" as needed before this goes live
-  to real people -- nothing exists for this yet.
-- **Acceptance**: a way for a rider to report a problem with a specific
-  request/counterpart (e.g. `POST /requests/{id}/report` with a reason),
-  stored durably (not just logged to stdout), visible nowhere publicly.
-  No moderation workflow or admin UI needs building yet -- the minimal
-  scope here is just making sure a report isn't lost.
-
 ### 17. Data retention pass for matched/expired requests
 - SCOPE.md flags "real data protection for real location data" as a real
   requirement. Right now a matched or expired request's precise location
@@ -93,7 +83,37 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
-### 15. Recurring-request lifecycle: cancel/withdraw + decide "expired" semantics (`6aeef0c`)
+### 16. Minimal abuse/harassment reporting (`e439520`)
+- SCOPE.md's "part that isn't just an engineering decision" names "some
+  way to handle harassment/abuse reports" as needed before this goes live
+  to real people -- nothing existed for this before this task.
+- `POST /requests/{id}/report` (`app/router.py`) takes a `reason` (and an
+  optional `reporter_request_id` -- the same no-login "proof of
+  involvement" `viewer_request_id` already stands in for elsewhere,
+  optional since someone just browsing the public list without ever
+  posting a request of their own can still see something worth
+  reporting). 404s if the reported request doesn't exist; 422s on an
+  empty reason via Pydantic's `min_length=1` rather than silently storing
+  a blank one.
+- Own table (`abuse_reports`, `migrations/versions/0002_abuse_reports.py`),
+  own store (`app/reports.py`'s `ReportStore`, mirroring `app/store.py`'s
+  shape but write-only -- `add()` and nothing else), own ORM model
+  (`AbuseReportORM` in `app/models.py`). Deliberately **no** FK to
+  `ride_requests` and no GET route anywhere -- "stored durably, visible
+  nowhere publicly" is this task's whole acceptance bar, not a
+  moderation workflow or admin UI, which this explicitly doesn't build.
+- Tests (`tests/test_reports.py`): `ReportStore.add()` survives a
+  simulated restart the same way `tests/test_store_persistence.py` proves
+  for `RequestStore` (a fresh session factory, not a shared Python
+  object, has to be what returns the row); the HTTP route stores a real
+  row keyed by the reported request's id, records
+  `reporter_request_id` when given; an unknown request id 404s and
+  writes nothing; an empty reason 422s and writes nothing; and a report's
+  reason text never shows up in `GET /requests` or `GET /requests/{id}`'s
+  response body. `tests/conftest.py` now truncates `abuse_reports`
+  alongside `ride_requests` between tests.
+
+### 15. Recurring-request lifecycle: cancel/withdraw + decide "expired" semantics (`ed3cae4`)
 - The decision task 14 left open: I'm going with poster-initiated cancel
   as the *only* way a recurring request stops being matchable -- it never
   expires on its own. SCOPE.md never gives a recurring pattern an end

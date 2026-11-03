@@ -32,3 +32,23 @@ class RideRequestORM(Base):
     status = Column(String, nullable=False, default="open")
     posted_at = Column(DateTime(timezone=False), nullable=False)
     matched_with = Column(PGUUID(as_uuid=True), nullable=True)
+
+
+class AbuseReportORM(Base):
+    """Backs app/reports.py's ReportStore (TASKS.md #16 -- "stored durably,
+    visible nowhere publicly"). No FK constraint on reported_request_id:
+    a report should still be stored even if the reported request is later
+    deleted/expired, and this table is never joined back into any public
+    response."""
+
+    __tablename__ = "abuse_reports"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reported_request_id = Column(PGUUID(as_uuid=True), nullable=False)
+    # The reporter's own request id, same no-login "proof of involvement"
+    # as app/router.py's viewer_request_id (TASKS.md #7) -- optional, since
+    # someone browsing the public list without ever posting a request of
+    # their own can still see something worth reporting.
+    reporter_request_id = Column(PGUUID(as_uuid=True), nullable=True)
+    reason = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=False), nullable=False)

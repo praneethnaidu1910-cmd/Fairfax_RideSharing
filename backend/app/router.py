@@ -14,6 +14,8 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisco
 from app.geocoding import PlaceNotFoundError, geocode_place
 from app.privacy import to_public
 from app.schemas import (
+    AbuseReport,
+    AbuseReportCreate,
     Location,
     RequestStatus,
     RideRequest,
@@ -105,6 +107,28 @@ def cancel_request(request_id: UUID, request: Request) -> RideRequestPublic:
     # stops it from winning a future match, not the status flip alone.
     request.app.state.engine.remove_from_pool(target.id)
     return to_public(target)
+
+
+@router.post("/requests/{request_id}/report", status_code=201)
+def report_request(request_id: UUID, payload: AbuseReportCreate, request: Request) -> dict[str, str]:
+    """A rider flagging a problem with a specific request/counterpart
+    (TASKS.md #16, SCOPE.md's "some way to handle harassment/abuse
+    reports"). Durably stored, never surfaced in any public response --
+    there's deliberately no GET for this, and no moderation workflow or
+    admin UI to build yet; the minimal scope here is just making sure a
+    report isn't lost.
+    """
+    store = request.app.state.store
+    if store.get(request_id) is None:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    report = AbuseReport(
+        reported_request_id=request_id,
+        reporter_request_id=payload.reporter_request_id,
+        reason=payload.reason,
+    )
+    request.app.state.report_store.add(report)
+    return {"status": "received"}
 
 
 @router.websocket("/matches")

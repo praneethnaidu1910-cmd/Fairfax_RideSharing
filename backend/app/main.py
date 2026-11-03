@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app.db import make_session_factory
 from app.dispatch.router import router as dispatch_router
 from app.matching.engine import MatchingEngine
+from app.reports import ReportStore
 from app.router import router as requests_router
 from app.store import RequestStore
 from app.web import router as web_router
@@ -25,6 +26,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # there in the next.
     app.state.store = RequestStore(make_session_factory())
     app.state.engine = MatchingEngine(store=app.state.store)
+    # Abuse/harassment reports (TASKS.md #16) -- its own store, own table,
+    # no relation to the matching pipeline above.
+    app.state.report_store = ReportStore(make_session_factory())
     # run_forever() is the incremental-matching pipeline from TASKS.md #5 --
     # started here, per that module's own docstring, so POST /requests can
     # just submit() and let this task do the matching in the background.

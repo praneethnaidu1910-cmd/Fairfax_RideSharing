@@ -4,8 +4,8 @@ Sets DATABASE_URL (if the environment hasn't already) to the local test
 Postgres database this sandbox stood up, applies the real Alembic
 migrations against it once per session -- not `Base.metadata.create_all()`,
 since the point is proving the migrations themselves work, not just the
-ORM models -- and truncates `ride_requests` after each test so one test's
-leftover rows can't affect another's.
+ORM models -- and truncates `ride_requests`/`abuse_reports` after each test
+so one test's leftover rows can't affect another's.
 """
 
 import os
@@ -36,5 +36,5 @@ def _clean_ride_requests(_migrated_database):
     yield
     engine = create_engine(os.environ["DATABASE_URL"], future=True)
     with engine.begin() as connection:
-        connection.execute(text("TRUNCATE TABLE ride_requests"))
+        connection.execute(text("TRUNCATE TABLE ride_requests, abuse_reports"))
     engine.dispose()

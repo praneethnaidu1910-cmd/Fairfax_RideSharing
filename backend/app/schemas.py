@@ -96,6 +96,30 @@ class RideRequestCreate(BaseModel):
     contact: str
 
 
+class AbuseReportCreate(BaseModel):
+    """POST /requests/{id}/report body (TASKS.md #16) -- a rider flagging a
+    problem with a specific request/counterpart. `reporter_request_id` is
+    optional: the same no-login "proof of involvement" as
+    `viewer_request_id` elsewhere, but someone just browsing the public
+    list without ever posting a request of their own can still report
+    something they saw."""
+
+    reason: str = Field(min_length=1)
+    reporter_request_id: Optional[UUID] = None
+
+
+class AbuseReport(BaseModel):
+    """Stored shape (app/reports.py) -- never serialized into any response;
+    this table backs no public read path at all (TASKS.md #16: "visible
+    nowhere publicly")."""
+
+    id: UUID = Field(default_factory=uuid4)
+    reported_request_id: UUID
+    reporter_request_id: Optional[UUID] = None
+    reason: str = Field(min_length=1)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class RideRequestPublic(BaseModel):
     """GET /requests shape -- coarse location + fuzzed time only, never the
     precise Location or `contact` (SCOPE.md: "no exact address, ever,
