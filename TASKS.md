@@ -48,19 +48,6 @@ that works" to "something a real person can actually open and use."
 - **Acceptance**: the app is reachable at a real URL from a phone or
   laptop that isn't the machine running it.
 
-### 18. Deployment prep (the non-account parts of task 13)
-- Task 13 itself is off-limits to automated runs (hosting account,
-  billing), but the app isn't deploy-ready independent of that either:
-  no health-check endpoint, no container image, and CORS/production
-  config is whatever FastAPI's defaults happen to be.
-- **Acceptance**: a `GET /healthz` (or similar) route a hosting platform
-  can poll, a `Dockerfile` that builds and runs the app against an
-  external `DATABASE_URL`, and production-safe defaults (CORS
-  restricted, debug off) documented in a new README "Deploying" section
-  alongside the existing "Running locally" one. None of this creates an
-  account or spends money -- once it's done, task 13 is just "sign up
-  for hosting and point it at this."
-
 ### 19. Legal research memo: ride-cost-splitting vs. carpooling in Virginia (manual/research only -- not for automated code-writing runs)
 - SCOPE.md names this open question explicitly and says it's "worth
   actually researching before this goes live... not something to
@@ -73,6 +60,56 @@ that works" to "something a real person can actually open and use."
   should check off.
 
 ## Done
+
+### 18. Deployment prep (the non-account parts of task 13) (`f8eb96d`)
+- Task 13 itself is still off-limits to automated runs (hosting account,
+  billing), but the app wasn't deploy-ready independent of that either --
+  closing the gap the rule at the top of this file names: no health-check
+  endpoint, no container image, and CORS/production config was whatever
+  FastAPI's defaults happened to be.
+- `GET /healthz` (`app/main.py`) actually runs `SELECT 1` against
+  `request.app.state.session_factory` -- 200 when Postgres answers, 503
+  when it doesn't -- instead of just confirming the process is up, which
+  is what a hosting platform's health/readiness probe actually needs to
+  know before routing traffic to a container. Reads `request.app`, not
+  the module-level `app` global, so it's correct regardless of which app
+  instance served the request (caught this the hard way via my own
+  `test_cors.py`'s `importlib.reload` -- the old closure-over-the-global
+  version silently started reading a *different* app's state once the
+  module got reloaded).
+- Replaced the old bare `GET /health` with this -- nothing else in the
+  codebase or tests referenced that route, so there was no reason to keep
+  both.
+- `CORSMiddleware` (`app/main.py`) is now wired explicitly, controlled by
+  a new `ALLOWED_ORIGINS` env var (`parse_allowed_origins()`,
+  comma-separated). Unset -- the default, same as running locally -- adds
+  no CORS middleware at all, same restrictive posture as before this
+  task, just now a deliberate, documented choice instead of an unexamined
+  default. FastAPI's own `debug` flag already defaults to `False` and
+  nothing turns it on, so "debug off" needed documenting, not code.
+- `backend/Dockerfile` builds the app and runs `alembic upgrade head`
+  (no-op if already current) before starting `uvicorn --host 0.0.0.0`
+  with no `--reload`, against whatever `DATABASE_URL`/`ALLOWED_ORIGINS`
+  the container's given at run time -- never baked into the image.
+  **Not yet verified by an actual `docker build`/`docker run`** -- this
+  sandbox's Docker daemon can't be started here (no permission to run one
+  inside this container, confirmed via `service docker start` and `docker
+  info`), the same kind of real-environment limitation TASKS.md #10's
+  geocoding and #12's browser checks already ran into. Worth a real build
+  by hand on a machine with a working Docker daemon before trusting the
+  image is actually correct, not just plausible-looking.
+- New root README "Deploying" section documents all of the above
+  (healthz, Dockerfile usage, `ALLOWED_ORIGINS`, debug) so task 13 really
+  is just "sign up for hosting and point it at this" once it happens.
+- Tests (`tests/test_health.py`, `tests/test_cors.py`): `/healthz` 200 on
+  a real reachable test database and 503 when `session_factory` is
+  swapped for one that raises; `parse_allowed_origins()` covered directly
+  (empty/unset, one origin, several with stray whitespace); CORS
+  middleware actually absent with `ALLOWED_ORIGINS` unset and actually
+  restricting to the configured origin (via `importlib.reload`, since the
+  middleware is wired once at import time from the env var) when it's
+  set -- an unlisted `Origin` gets no
+  `access-control-allow-origin` header back.
 
 ### 17. Data retention pass for matched/cancelled/expired requests (`e62270a`)
 - SCOPE.md flags "real data protection for real location data" as a real

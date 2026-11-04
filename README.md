@@ -207,3 +207,57 @@ deployed, e.g. a daily cron entry:
 ```bash
 cd backend && python scripts/anonymize_stale_requests.py
 ```
+
+## Deploying
+
+TASKS.md #13 (getting this onto a real public URL) needs a hosting account
+and billing, which is a by-hand step, not something an automated run does.
+This section is the rest of it -- the part that doesn't touch an account or
+spend money, so task 13 itself is just "sign up for hosting and point it at
+this."
+
+**Health check.** `GET /healthz` actually exercises the database connection
+(`SELECT 1`), not just "is the process running" -- it returns `200
+{"status": "ok"}` when Postgres is reachable and `503
+{"status": "error", ...}` when it isn't, which is what a hosting platform's
+health check/readiness probe should poll.
+
+**Container image.** `backend/Dockerfile` builds the app and runs
+`alembic upgrade head` on every container start (a no-op once the schema's
+already current) before starting `uvicorn` bound to `0.0.0.0:8000` -- no
+`--reload`, since that's a local-dev convenience, not something a
+production container needs. `DATABASE_URL` is never baked into the image;
+pass it (and `ALLOWED_ORIGINS` below, if needed) as a container env var at
+deploy time, same as running locally:
+
+```bash
+cd backend
+docker build -t fairfax-ridesharing .
+docker run -p 8000:8000 \
+  -e DATABASE_URL="postgresql+psycopg2://<user>:<password>@<host>:5432/<db>" \
+  fairfax-ridesharing
+```
+
+Not yet verified by actually building the image -- this sandbox's Docker
+daemon can't be started here (no permission to run one inside this
+container), the same kind of real environment limitation TASKS.md #10's
+geocoding and #12's browser checks already ran into. Worth a real `docker
+build`/`docker run` by hand once there's a machine with a working Docker
+daemon, before trusting this is the final word on the image.
+
+**CORS.** FastAPI adds no CORS headers unless told to -- browsers block
+every cross-origin request by default, which is fine until the frontend is
+served from a different origin than the API (e.g. a static site calling a
+separately-hosted API). `ALLOWED_ORIGINS` is a comma-separated env var
+naming exactly which origin(s) may call this API cross-origin; unset (the
+default, same as running locally) means no CORS middleware is added at all
+-- restrictive by default, never a wildcard:
+
+```bash
+export ALLOWED_ORIGINS="https://your-frontend-domain.example"
+```
+
+**Debug.** FastAPI's own `debug` flag already defaults to `False` and
+nothing in `app/main.py` turns it on, so there's no production/dev config
+split to get wrong here -- noting it since task 18 asked for this to be a
+documented, deliberate choice rather than an unexamined default.
