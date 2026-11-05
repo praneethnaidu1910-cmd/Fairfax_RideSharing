@@ -39,6 +39,21 @@ def test_match_batch_updates_status_of_matched_requests_only():
         assert request.status == expected
 
 
+def test_match_batch_match_reason_is_real_not_a_canned_string():
+    # SCOPE.md MVP item 6: the engine has to actually state why a given
+    # pair matched, not print the same sentence for every match.
+    requests = _sample_copy()
+    rider_1_id = requests[0].id
+    rider_7_id = requests[6].id
+
+    matches = MatchingEngine().match_batch(requests)
+
+    match = next(m for m in matches if set(m.request_ids) == {rider_1_id, rider_7_id})
+    assert "mi apart" in match.reason
+    assert "min window overlap" in match.reason
+    assert "capacity fits" in match.reason
+
+
 def test_match_batch_produces_no_capacity_violations():
     requests = _sample_copy()
     by_id = {r.id: r for r in requests}

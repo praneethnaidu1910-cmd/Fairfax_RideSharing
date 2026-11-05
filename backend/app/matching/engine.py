@@ -23,9 +23,10 @@ from app.matching.scoring import (
     compatibility_score,
     directional_score,
     expand_schedule,
+    explain_match,
     is_expired,
 )
-from app.schemas import MatchGroup, RequestStatus, RideRequest
+from app.schemas import MatchGroup, OneOffSchedule, RequestStatus, RideRequest
 
 if TYPE_CHECKING:
     from app.store import RequestStore
@@ -91,7 +92,7 @@ class MatchingEngine:
         by_id = {r.id: r for r in open_requests}
         candidates = candidate_groups(open_requests)
 
-        scored_pairs: list[tuple[float, UUID, UUID]] = []
+        scored_pairs: list[tuple[float, UUID, UUID, OneOffSchedule, OneOffSchedule]] = []
         seen_pairs: set[frozenset[UUID]] = set()
         for request in open_requests:
             windows_a = expand_schedule(request.schedule)
@@ -107,18 +108,24 @@ class MatchingEngine:
                     continue
 
                 windows_b = expand_schedule(candidate.schedule)
-                best_score = max(
-                    compatibility_score(request, candidate, window_a, window_b)
-                    for window_a in windows_a
-                    for window_b in windows_b
+                # Track which window pair actually produced the best score,
+                # not just the score itself -- explain_match() below needs
+                # the real overlapping windows, not an arbitrary one.
+                best_score, best_window_a, best_window_b = None, None, None
+                for window_a in windows_a:
+                    for window_b in windows_b:
+                        score = compatibility_score(request, candidate, window_a, window_b)
+                        if best_score is None or score > best_score:
+                            best_score, best_window_a, best_window_b = score, window_a, window_b
+                scored_pairs.append(
+                    (best_score, request.id, candidate.id, best_window_a, best_window_b)
                 )
-                scored_pairs.append((best_score, request.id, candidate.id))
 
         scored_pairs.sort(key=lambda scored: scored[0], reverse=True)
 
         matched_ids: set[UUID] = set()
         matches: list[MatchGroup] = []
-        for score, a_id, b_id in scored_pairs:
+        for score, a_id, b_id, window_a, window_b in scored_pairs:
             if a_id in matched_ids or b_id in matched_ids:
                 continue
             matched_ids.add(a_id)
@@ -140,7 +147,7 @@ class MatchingEngine:
                 MatchGroup(
                     request_ids=[a_id, b_id],
                     score=score,
-                    reason="shared corridor, overlapping window, capacity fits",
+                    reason=explain_match(by_id[a_id], by_id[b_id], window_a, window_b),
                 )
             )
         return matches
@@ -173,6 +180,8 @@ class MatchingEngine:
 
         best_score: Optional[float] = None
         best_candidate: Optional[RideRequest] = None
+        best_window_new: Optional[OneOffSchedule] = None
+        best_window_existing: Optional[OneOffSchedule] = None
         for candidate in candidates:
             if is_expired(candidate):
                 continue
@@ -181,13 +190,12 @@ class MatchingEngine:
             if directional_score(request, candidate) < MIN_DIRECTIONAL_SCORE:
                 continue
             windows_existing = expand_schedule(candidate.schedule)
-            score = max(
-                compatibility_score(request, candidate, window_a, window_b)
-                for window_a in windows_new
-                for window_b in windows_existing
-            )
-            if best_score is None or score > best_score:
-                best_score, best_candidate = score, candidate
+            for window_a in windows_new:
+                for window_b in windows_existing:
+                    score = compatibility_score(request, candidate, window_a, window_b)
+                    if best_score is None or score > best_score:
+                        best_score, best_candidate = score, candidate
+                        best_window_new, best_window_existing = window_a, window_b
 
         if best_candidate is None:
             self._unmatched.append(request)
@@ -208,7 +216,7 @@ class MatchingEngine:
             MatchGroup(
                 request_ids=[request.id, best_candidate.id],
                 score=best_score,
-                reason="shared corridor, overlapping window, capacity fits",
+                reason=explain_match(request, best_candidate, best_window_new, best_window_existing),
             )
         ]
 

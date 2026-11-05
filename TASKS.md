@@ -61,6 +61,35 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 20. Make match explanations real, not a canned string (`ce600a1`)
+- SCOPE.md's MVP item 6 says "for any match, the engine can state why --
+  shared corridor, time overlap, capacity fit," but `MatchGroup.reason` was
+  literally the same hardcoded sentence ("shared corridor, overlapping
+  window, capacity fits") for every match `match_batch()`/
+  `on_new_request()` ever produced -- it couldn't actually state why *this*
+  pair matched versus any other, it just always said the same thing.
+  Wasn't a numbered "Up next" item -- found it while reading through the
+  matching engine this run, and it's a pure engineering fix against an
+  already-decided requirement, not a product/design call, so I just closed
+  it instead of only noting it for later.
+- `app/matching/scoring.py`'s new `explain_match(a, b, window_a, window_b)`
+  builds the explanation from the same numbers `compatibility_score()`
+  already weighs -- origin/destination distance in miles, bearing
+  difference in degrees, and the actual overlap in minutes between the two
+  specific windows that produced the winning score -- so two different
+  matches now read differently instead of printing the same sentence.
+- Both `match_batch()` and `on_new_request()` (`app/matching/engine.py`)
+  needed to start tracking *which* window pair actually produced the best
+  score, not just the score itself (previously thrown away inside a `max()`
+  generator expression) -- `explain_match()` needs the real overlapping
+  windows to report a real overlap, not an arbitrary one.
+- Tests (`tests/test_scoring.py`): `explain_match()` on the known-good
+  rider-1/rider-7 pair actually names real distance/bearing/overlap/
+  capacity language, and differs from the same call on a known-far pair
+  (rider-1/rider-6) -- proving it's not still a canned string with extra
+  words tacked on. `tests/test_engine.py`'s new test asserts the same thing
+  at the `MatchGroup.reason` level `match_batch()` actually returns.
+
 ### 18. Deployment prep (the non-account parts of task 13) (`f8eb96d`)
 - Task 13 itself is still off-limits to automated runs (hosting account,
   billing), but the app wasn't deploy-ready independent of that either --

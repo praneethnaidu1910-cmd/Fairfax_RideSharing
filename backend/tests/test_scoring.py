@@ -5,6 +5,7 @@ from app.matching.scoring import (
     compatibility_score,
     directional_score,
     expand_schedule,
+    explain_match,
     is_expired,
     spatial_score,
     temporal_score,
@@ -58,6 +59,23 @@ def test_known_good_pair_scores_higher_than_known_bad_pair():
     good_score = compatibility_score(RIDER_1, RIDER_7, RIDER_1.schedule, RIDER_7.schedule)
     bad_score = compatibility_score(RIDER_1, RIDER_2, RIDER_1.schedule, RIDER_2.schedule)
     assert good_score > bad_score
+
+
+def test_explain_match_states_real_distances_overlap_and_capacity():
+    # SCOPE.md MVP item 6 ("for any match, the engine can state why") --
+    # the explanation has to actually name the real numbers, not just
+    # repeat a canned phrase.
+    reason = explain_match(RIDER_1, RIDER_7, RIDER_1.schedule, RIDER_7.schedule)
+    assert "mi apart" in reason
+    assert "bearing difference" in reason
+    assert "min window overlap" in reason
+    assert "capacity fits" in reason
+
+
+def test_explain_match_differs_between_a_close_and_a_far_pair():
+    close_reason = explain_match(RIDER_1, RIDER_7, RIDER_1.schedule, RIDER_7.schedule)
+    far_reason = explain_match(RIDER_1, RIDER_6, RIDER_1.schedule, RIDER_6.schedule)
+    assert close_reason != far_reason
 
 
 def _make_request(schedule) -> RideRequest:

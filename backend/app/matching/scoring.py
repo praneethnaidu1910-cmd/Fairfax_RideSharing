@@ -77,6 +77,31 @@ def capacity_fits(a: RideRequest, b: RideRequest, vehicle_capacity: int) -> bool
     return a.seats_needed + b.seats_needed <= vehicle_capacity
 
 
+def explain_match(
+    a: RideRequest, b: RideRequest, window_a: OneOffSchedule, window_b: OneOffSchedule
+) -> str:
+    """Per-pair, data-driven explanation for SCOPE.md's MVP item 6
+    ("for any match, the engine can state why -- shared corridor, time
+    overlap, capacity fit") -- built from the same numbers
+    compatibility_score() already weighs, so every match gets its own
+    explanation instead of one canned string identical for every match."""
+    origin_distance = haversine_miles(a.origin.lat, a.origin.lng, b.origin.lat, b.origin.lng)
+    destination_distance = haversine_miles(
+        a.destination.lat, a.destination.lng, b.destination.lat, b.destination.lng
+    )
+    bearing_a = bearing_degrees(a.origin.lat, a.origin.lng, a.destination.lat, a.destination.lng)
+    bearing_b = bearing_degrees(b.origin.lat, b.origin.lng, b.destination.lat, b.destination.lng)
+    bearing_difference = abs((bearing_a - bearing_b + 180) % 360 - 180)
+    overlap_start = max(window_a.earliest_departure, window_b.earliest_departure)
+    overlap_end = min(window_a.latest_departure, window_b.latest_departure)
+    overlap_minutes = max(0.0, (overlap_end - overlap_start).total_seconds() / 60)
+    return (
+        f"origins {origin_distance:.1f}mi apart, destinations {destination_distance:.1f}mi apart, "
+        f"{bearing_difference:.0f}° bearing difference, {overlap_minutes:.0f}min window overlap, "
+        f"capacity fits"
+    )
+
+
 def is_expired(request: RideRequest, now: Optional[datetime] = None) -> bool:
     """Whether `request`'s departure window has fully passed (SCOPE.md's
     "live status: open / matched / expired" -- TASKS.md #14).
