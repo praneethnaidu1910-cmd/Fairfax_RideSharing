@@ -26,10 +26,19 @@ FUZZ_PADDING = timedelta(minutes=15)
 
 
 def _shift_time(value: time, delta: timedelta) -> time:
-    # time has no arithmetic of its own -- combine with a throwaway date,
-    # shift, then drop the date again. Fine for this demo's daytime commute
-    # windows; doesn't handle wrapping across midnight.
-    return (datetime.combine(date.today(), value) + delta).time()
+    # time has no arithmetic of its own -- combine with a throwaway date and
+    # shift. A RecurringSchedule's earliest/latest are same-day times with no
+    # date attached (model_validator enforces latest >= earliest), so a shift
+    # that crosses midnight has nowhere to go -- clamp to the day's own
+    # boundaries instead of letting the dropped date silently wrap the time
+    # back around (e.g. 00:05 - 15min becoming 23:50, which would then read
+    # as *after* a same-day latest_departure_time and blow up the
+    # RecurringSchedule's own validator the moment anyone browsed a request
+    # with an early-morning or late-night recurring window).
+    day_start = datetime.combine(date.today(), time.min)
+    day_end = datetime.combine(date.today(), time.max)
+    shifted = datetime.combine(date.today(), value) + delta
+    return max(day_start, min(shifted, day_end)).time()
 
 
 def fuzz_schedule(

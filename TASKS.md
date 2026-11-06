@@ -61,6 +61,51 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 22. Fix a 500 on browsing/posting an early-morning or late-night recurring request
+- Not a numbered "Up next" item -- found it while reading `app/privacy.py`
+  this run, same pattern as tasks 20/21: a pure bug against already-decided
+  behavior (the fuzzing SCOPE.md already requires for every pre-match view
+  has to actually not crash), not a product/design call, so I closed it
+  instead of just noting it.
+- `fuzz_schedule()`'s `_shift_time()` helper widens a `RecurringSchedule`'s
+  bare `time`-of-day fields by `FUZZ_PADDING` (15min) on each end by
+  combining the time with a throwaway date, shifting it, then dropping the
+  date again -- and its own comment already said this "doesn't handle
+  wrapping across midnight," reasoning that was "fine for this demo's
+  daytime commute windows." That reasoning was wrong, not just imprecise:
+  for a recurring window starting within 15 minutes of midnight (e.g.
+  `earliest_departure_time=00:05`), subtracting 15 minutes and dropping the
+  date wrapped the time back around to `23:50` the *previous* day -- which
+  then reads as later than a same-day `latest_departure_time` and trips
+  `RecurringSchedule`'s own "latest must not be before earliest" validator.
+  Same thing in reverse for a window ending within 15 minutes of midnight.
+  Confirmed this wasn't theoretical: posted a recurring request with
+  `earliest_departure_time=00:05` through a real `TestClient` against a
+  running app before the fix and watched `POST /requests` itself 500 (the
+  response is built with `to_public()`, which calls `fuzz_schedule()`) --
+  so this wasn't just `GET /requests`/`GET /requests/{id}`, posting an
+  early-morning recurring request was broken outright. Re-ran the same
+  script after the fix: `201` on the post, `200` on the follow-up `GET`,
+  window correctly widened and clamped at `00:00:00`/`23:59:59.999999`
+  instead of wrapping.
+- Fix: `_shift_time()` now clamps the shifted time to the day's own
+  `time.min`/`time.max` boundary instead of letting the dropped date wrap
+  it. Since the original window already satisfies `latest >= earliest`
+  (the schedule's own validator), and clamping can only move the widened
+  earliest *up* toward the original and the widened latest *down* toward
+  the original, the widened pair can never cross -- no crash is possible
+  for any input, not just today's early-morning case, with no change to
+  how `OneOffSchedule` fuzzing works (full datetimes, no wraparound to
+  begin with).
+- There was no direct test coverage of `app/privacy.py` at all before this
+  -- `fuzz_schedule()`/`to_public()` were only ever exercised incidentally
+  through API tests with ordinary daytime windows, never with an edge case
+  that would catch this. New `tests/test_privacy.py` covers both normal
+  widening (one-off and recurring) and this exact regression (both the
+  early-morning and late-night wraparound cases), plus `to_public()`'s own
+  no-contact/no-precise-location and computed-`expired`-status behavior
+  directly rather than only through the HTTP layer.
+
 ### 21. Fix stored XSS in the live-match reveal (`live.js`)
 - Not a numbered "Up next" item either -- found it while reading through
   the frontend this run, same as task 20 was found last time: a pure
