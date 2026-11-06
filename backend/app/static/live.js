@@ -32,11 +32,21 @@
 
     waitingMessage.textContent = "Matched! Your ride partner, " + counterpart.rider_id + ":";
     revealBox.hidden = false;
-    revealBox.innerHTML =
-      "<ul>" +
-      "<li>Contact: " + counterpart.contact + "</li>" +
-      "<li>Pickup: " + counterpart.origin.lat + ", " + counterpart.origin.lng + "</li>" +
-      "<li>Dropoff: " + counterpart.destination.lat + ", " + counterpart.destination.lng + "</li>" +
-      "</ul>";
+    // Built with textContent, not innerHTML -- counterpart.contact/rider_id
+    // are free text another rider typed into POST /requests with no
+    // sanitization (SCOPE.md never restricts `contact` to a phone-number
+    // shape), so interpolating them into an HTML string here would let a
+    // malicious poster's contact field run as script in whoever they match
+    // with's browser the moment the reveal renders.
+    const list = document.createElement("ul");
+    const addRevealItem = (label, value) => {
+      const item = document.createElement("li");
+      item.textContent = label + ": " + value;
+      list.appendChild(item);
+    };
+    addRevealItem("Contact", counterpart.contact);
+    addRevealItem("Pickup", counterpart.origin.lat + ", " + counterpart.origin.lng);
+    addRevealItem("Dropoff", counterpart.destination.lat + ", " + counterpart.destination.lng);
+    revealBox.replaceChildren(list);
   });
 })();

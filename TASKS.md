@@ -61,6 +61,44 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 21. Fix stored XSS in the live-match reveal (`live.js`)
+- Not a numbered "Up next" item either -- found it while reading through
+  the frontend this run, same as task 20 was found last time: a pure
+  security/engineering fix against an already-decided requirement (the
+  reveal has to actually be safe to render, not just correctly gated to
+  the matched counterpart), not a product/design call, so I closed it
+  instead of just noting it.
+- `app/static/live.js`'s client-side reveal (the WebSocket path task 12
+  built, as opposed to `mine.html`'s server-rendered/Jinja2-escaped path
+  for a reload after the fact) built the matched counterpart's `rider_id`
+  and `contact` straight into an HTML string and assigned it to
+  `revealBox.innerHTML`. Both fields are free text another rider typed
+  into `POST /requests` with zero sanitization -- SCOPE.md never asks
+  `contact` to look like a phone number, it's just "contact info... same
+  trust level as the group today" -- so anyone could post a request with
+  `contact` (or `rider_id`) set to an `<img src=x onerror=...>` payload
+  and have it execute in the browser of whoever they matched with, the
+  instant the reveal rendered. Confirmed this was real, not theoretical,
+  by temporarily swapping the pre-fix `live.js` back onto a running
+  server and driving the actual flow with headless Chromium (Playwright):
+  posted a rider with that payload as `contact`, had another rider match
+  with them, and watched the `onerror` handler actually fire
+  (`window.__xss_fired` flips to `true`, a real `<img>` element lands in
+  the DOM) on the matched counterpart's `/mine/<id>` page. Re-ran the same
+  script against the fixed version afterward: the payload shows up as
+  literal text in the `<li>`, no `<img>` element, handler never fires.
+- Fix: build the reveal with `document.createElement`/`textContent`
+  (`addRevealItem()`) and `replaceChildren()` instead of a concatenated
+  HTML string -- `textContent` never interprets its argument as markup,
+  so this closes the hole for any string field here, not just today's PoC
+  payload, with no allowlist/escaping logic to keep in sync by hand.
+- No automated test added for this one: there's no JS test harness in
+  this repo at all (`static/*.js` has always been manual-smoke-test-only,
+  per TASKS.md #12's own note), and the real coverage here is the
+  before/after Playwright run described above, not something `pytest`
+  exercises. Worth a real JS test harness if `static/` grows much more --
+  noting that as a gap, not fixing it in this same pass.
+
 ### 20. Make match explanations real, not a canned string (`ce600a1`)
 - SCOPE.md's MVP item 6 says "for any match, the engine can state why --
   shared corridor, time overlap, capacity fit," but `MatchGroup.reason` was
