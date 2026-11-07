@@ -21,6 +21,17 @@ def test_match_rejects_malformed_request():
     assert response.status_code == 422
 
 
+def test_match_rejects_physically_impossible_coordinates():
+    # Reproduction of the same bug tests/test_schemas.py's
+    # test_location_rejects_out_of_range_coordinates covers for the
+    # pooling engine's own Location: before the dispatch module's
+    # Location got the same lat/lng bounds, this returned 200 with a
+    # "nearest" driver computed from a nonsense distance instead of 422.
+    response = client.post("/match", json={"rider_location": {"lat": 999.0, "lng": -500.0}})
+
+    assert response.status_code == 422
+
+
 def test_match_returns_404_when_no_drivers_available(monkeypatch):
     from app.dispatch.schemas import Driver, Location
 

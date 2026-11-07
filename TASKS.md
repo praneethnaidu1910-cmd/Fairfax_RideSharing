@@ -61,6 +61,37 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 24. Reject physically-impossible coordinates in the dispatch module too
+- Not a numbered "Up next" item -- "Up next" only has tasks 13 and 19 on it
+  right now and both are explicitly manual-only, so this evening run went
+  looking for a real bug the same way the last few runs did, and found one:
+  the exact same gap task 23 just closed, but in the dispatch side-module's
+  own `Location`, which wasn't touched by that fix since the two modules
+  deliberately don't share schemas.
+- `app/dispatch/schemas.py`'s `Location` had no range check on `lat`/`lng`
+  either. Confirmed this was real with a live `TestClient`: `POST /match`
+  with `rider_location.lat=999.0, lng=-500.0` returned `200` with a
+  "nearest" driver and a `distance_miles` of several thousand -- a
+  physically meaningless number computed from an impossible point, not
+  even the kind of number a real location could ever produce, returned as
+  if it were a normal match. `app/dispatch/matching.py`'s
+  `haversine_miles` doesn't raise on this (checked the actual trig math:
+  the haversine `h` term stays mathematically bounded in `[0, 1]`
+  regardless of how far outside real-world range the input is, so there's
+  no `math.asin` domain error either -- this is a silent-garbage bug, not
+  a crash).
+- Fix: same as task 23, same reasoning -- `lat`/`lng` are now
+  `Field(ge=-90, le=90)` / `Field(ge=-180, le=180)`. `POST /match` now
+  422s on an out-of-range `rider_location` instead of returning a bogus
+  match; a normal in-range request right after it still works the same as
+  before.
+- Tests: new `tests/test_dispatch_schemas.py` mirrors
+  `tests/test_schemas.py`'s coverage of the main `Location` (rejects just
+  past each of the four bounds, accepts the poles/antimeridian themselves).
+  `tests/test_dispatch_api.py` gets the HTTP-level reproduction as a
+  regression test -- the exact `lat=999`/`lng=-500` case now `422`s. Full
+  suite: 130 tests, up from 122, all green.
+
 ### 23. Reject physically-impossible coordinates instead of silently matching on them
 - Not a numbered "Up next" item -- found this while poking at the API with
   edge-case inputs this run, same pattern as tasks 20-22: a pure
