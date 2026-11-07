@@ -9,8 +9,16 @@ from app.geo import h3_cell
 
 
 class Location(BaseModel):
-    lat: float
-    lng: float
+    # Real-world latitude/longitude bounds -- without these a client typo
+    # (or a bad Nominatim parse) like lat=999 was silently accepted and fed
+    # straight into app/geo.py's haversine/bearing math (no error, since
+    # math.sin/cos don't care that 999 degrees isn't a real latitude), so
+    # matching quietly scored nonsense distances/bearings for an impossible
+    # point instead of rejecting it at intake. SCOPE.md/docs/
+    # MATCHING_ALGORITHM.md both assume real coordinates throughout; this
+    # just makes that assumption an enforced one.
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
 
     def coarse_cell(self) -> str:
         """Neighborhood-level H3 cell -- what other users see pre-match."""

@@ -49,6 +49,21 @@ def test_create_request_response_is_coarse_and_never_leaks_precise_or_contact():
     assert str(FAIRFAX[1]) not in response.text
 
 
+def test_create_request_rejects_impossible_coordinates():
+    # app/schemas.py's Location now range-checks lat/lng -- before this, a
+    # client typo like lat=999 was accepted (201) and fed straight into the
+    # matching engine's distance/bearing math, which doesn't error on an
+    # impossible point, it just silently computes nonsense.
+    payload = _one_off_payload(
+        "rider-bad-coords", (999.0, -500.0), ALDIE, 120, 30, contact="555-0000"
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_list_requests_never_includes_precise_location_or_contact():
     payload = _one_off_payload(
         "rider-privacy-test-2", FAIRFAX, ALDIE, 120, 30, contact="555-8888-secret"

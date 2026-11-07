@@ -61,6 +61,41 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 23. Reject physically-impossible coordinates instead of silently matching on them
+- Not a numbered "Up next" item -- found this while poking at the API with
+  edge-case inputs this run, same pattern as tasks 20-22: a pure
+  data-validation bug against behavior SCOPE.md/docs/MATCHING_ALGORITHM.md
+  already assume (real geographic coordinates everywhere), not a product
+  call, so I'm closing it instead of just noting it.
+- `app/schemas.py`'s `Location` had no range check on `lat`/`lng` at all.
+  Confirmed this was real, not theoretical, with a live `TestClient`:
+  `POST /requests` with `origin.lat=999.0, origin.lng=-500.0` returned
+  `201`, and the request showed up on `GET /requests` with a real-looking
+  H3 `origin_area` -- `app/geo.py`'s `haversine_miles`/`bearing_degrees`
+  don't raise on an impossible point, `math.sin`/`math.cos` just keep
+  going, so a client typo (or a bad Nominatim parse slipping past task
+  10's geocoding wrapper some other way) would silently feed garbage
+  distance/bearing numbers into the matching engine instead of getting
+  rejected at intake, with nothing anywhere surfacing that the point was
+  nonsense.
+- Fix: `lat`/`lng` are now `Field(ge=-90, le=90)` / `Field(ge=-180,
+  le=180)` -- real-world bounds, inclusive of the poles/antimeridian
+  themselves. `POST /requests` now 422s on an out-of-range point instead
+  of accepting it; `app/web.py`'s form path already had a catch-all
+  `except (ValidationError, ValueError, TypeError)` around `Location`
+  construction, so an out-of-range value there just re-renders the form
+  with an error, no new code needed. Re-ran the same `TestClient` script
+  after the fix: `422` with a clear `lat`/`lng` message, and a normal
+  Fairfax-area request right after it still gets `201` -- the fix doesn't
+  touch valid input.
+- Tests: `tests/test_schemas.py` covers `Location` directly (rejects
+  lat/lng just past each of the four real-world bounds, accepts the
+  bounds themselves -- the poles and the antimeridian are valid points,
+  not off-by-one rejects). `tests/test_requests_api.py`'s new test is the
+  HTTP-level acceptance check -- `POST /requests` with the exact
+  `lat=999`/`lng=-500` reproduction above now `422`s. Full suite (122
+  tests, up from 114) still green.
+
 ### 22. Fix a 500 on browsing/posting an early-morning or late-night recurring request
 - Not a numbered "Up next" item -- found it while reading `app/privacy.py`
   this run, same pattern as tasks 20/21: a pure bug against already-decided

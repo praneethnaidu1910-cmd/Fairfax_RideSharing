@@ -91,6 +91,34 @@ def test_contact_present_on_model_but_not_required_serialized_elsewhere():
     assert "contact" in req.model_dump()
 
 
+@pytest.mark.parametrize(
+    "lat,lng",
+    [
+        (999.0, -77.3064),  # out-of-range latitude
+        (38.8462, -500.0),  # out-of-range longitude
+        (90.1, 0.0),  # just past the real-world pole boundary
+        (-90.1, 0.0),
+        (0.0, 180.1),
+        (0.0, -180.1),
+    ],
+)
+def test_location_rejects_out_of_range_coordinates(lat, lng):
+    # Without range validation, an impossible point like lat=999 was
+    # silently accepted and fed straight into app/geo.py's haversine/
+    # bearing math (no error -- math.sin/cos don't care that 999 isn't a
+    # real latitude), so a client typo or a bad geocoding parse would
+    # quietly produce nonsense match scores instead of a clear rejection.
+    with pytest.raises(ValidationError):
+        Location(lat=lat, lng=lng)
+
+
+def test_location_accepts_boundary_coordinates():
+    # The real-world edges themselves (poles, antimeridian) are valid and
+    # must not be rejected by an off-by-one bound.
+    Location(lat=90.0, lng=180.0)
+    Location(lat=-90.0, lng=-180.0)
+
+
 def test_coarse_cell_is_stable_h3_index():
     loc = Location(lat=38.8462, lng=-77.3064)
     cell = loc.coarse_cell()
