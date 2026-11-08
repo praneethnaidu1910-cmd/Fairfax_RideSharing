@@ -61,6 +61,47 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 26. Reject an empty rider_id/contact at intake instead of silently matching on them
+- Not a numbered "Up next" item -- same pattern as the last several
+  entries here: "Up next" only has tasks 13/19 on it and both are
+  manual-only, so this morning run kept looking for a real bug instead of
+  stopping, and found one right next to the lat/lng gap tasks 23/24 closed.
+- `app/schemas.py`'s `RideRequestCreate.rider_id`/`contact` had no
+  non-empty constraint -- confirmed with a direct call that
+  `RideRequestCreate(rider_id="", ..., contact="")` validated cleanly.
+  SCOPE.md is explicit about why `contact` exists at all ("collected at
+  request time so a matched pair can reach each other"); an empty one
+  sails through intake, gets stored, and can get matched exactly like a
+  real one -- the counterpart's reveal (`app/web.py`'s `mine.html` /
+  `app/static/live.js`) would then show "Matched! Your ride partner, :"
+  and an empty Contact line, with literally no way to reach the person
+  they just matched with. Silently defeats the one stated purpose of
+  collecting the field, not a product/design call.
+- Fix: `Field(min_length=1)` on both `rider_id` and `contact`, but only on
+  `RideRequestCreate` (the intake boundary), not on `RideRequest` itself.
+  Tried putting it on `RideRequest` first and broke two existing
+  `tests/test_retention.py` tests -- `app/store.py`'s `_from_orm()`
+  reconstructs a `RideRequest` straight from a stored row, including an
+  already-anonymized one, and TASKS.md #17's `anonymize_stale()`
+  deliberately overwrites `contact` with `""` on purpose as part of
+  scrubbing a stale row. A constraint on `RideRequest` would have made
+  that already-stored, intentionally-blanked state fail to load at all.
+  `app/router.py`'s `create_request()` always builds `RideRequest` from
+  an already-validated `RideRequestCreate`, so enforcing it only at that
+  boundary doesn't weaken intake validation anywhere real client data
+  flows through.
+- Tests: `tests/test_schemas.py` covers `RideRequestCreate` directly
+  (rejects an empty `rider_id` or `contact`) and proves `RideRequest`
+  itself still accepts a blank `contact` (the anonymized-row case).
+  `tests/test_requests_api.py` adds the HTTP-level reproduction --
+  `POST /requests` with an empty `rider_id` or `contact` now `422`s.
+  Checked the `POST /new` web-form path too: an empty `contact` there
+  already 422s on its own, independent of this fix -- turns out
+  Starlette's `Form(...)` already treats an empty-but-present form field
+  as "missing" for a required field in the installed version, a
+  pre-existing, unrelated quirk I didn't touch. Full suite: 136 tests, up
+  from 131, all green.
+
 ### 25. Stop one bad request from permanently killing the live-matching pipeline
 - Not a numbered "Up next" item -- "Up next" only has tasks 13 and 19 on it
   right now and both are manual-only, so this morning run went looking for

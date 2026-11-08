@@ -67,6 +67,13 @@ class RequestStatus(str, Enum):
 
 class RideRequest(BaseModel):
     id: UUID = Field(default_factory=uuid4)
+    # Validated non-empty at intake, on RideRequestCreate below -- not
+    # re-validated here, because this is also the shape app/store.py's
+    # _from_orm() reconstructs straight from a stored row, including an
+    # already-anonymized one (TASKS.md #17's anonymize_stale() deliberately
+    # overwrites `contact` with "" as part of scrubbing a stale row's real
+    # data) -- a min_length constraint here would make that already-stored,
+    # intentionally-blanked state fail to load at all.
     rider_id: str
     origin: Location
     destination: Location
@@ -107,12 +114,21 @@ class RideRequestCreate(BaseModel):
     RideRequest assigns itself, so a client can't hand a request in as
     already `matched`."""
 
-    rider_id: str
+    # min_length=1 on both: an empty rider_id or contact used to be
+    # accepted here and would reach a match untouched -- the matched
+    # counterpart's reveal (app/web.py's mine.html / app/static/live.js)
+    # would then show "Matched! Your ride partner, :" and an empty Contact
+    # line, silently defeating SCOPE.md's whole stated reason for
+    # collecting `contact` ("so a matched pair can reach each other").
+    # Enforced here, at intake, rather than on RideRequest itself, since
+    # that shape also has to represent an already-anonymized stored row
+    # (TASKS.md #17), which blanks `contact` to "" on purpose.
+    rider_id: str = Field(min_length=1)
     origin: Location
     destination: Location
     schedule: Union[OneOffSchedule, RecurringSchedule]
     seats_needed: int = Field(default=1, ge=1)
-    contact: str
+    contact: str = Field(min_length=1)
 
 
 class AbuseReportCreate(BaseModel):

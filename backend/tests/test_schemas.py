@@ -10,6 +10,7 @@ from app.schemas import (
     RecurringSchedule,
     RequestStatus,
     RideRequest,
+    RideRequestCreate,
 )
 
 
@@ -139,3 +140,43 @@ def test_sample_data_has_both_schedule_kinds():
 def test_sample_data_has_both_stranger_and_group_requests():
     assert any(r.seats_needed == 1 for r in SAMPLE_REQUESTS)
     assert any(r.seats_needed > 1 for r in SAMPLE_REQUESTS)
+
+
+def _create_payload(**overrides):
+    base = dict(
+        rider_id="rider-x",
+        origin=Location(lat=38.8462, lng=-77.3064),
+        destination=Location(lat=38.9586, lng=-77.3570),
+        schedule=_one_off_schedule(),
+        contact="555-0199",
+    )
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize("field", ["rider_id", "contact"])
+def test_ride_request_create_rejects_empty_rider_id_or_contact(field):
+    # Without this, an empty contact reached a real match untouched --
+    # the matched counterpart's reveal would show nothing to actually
+    # contact, silently defeating SCOPE.md's whole stated reason for
+    # collecting this field. RideRequest itself (the stored/internal
+    # shape) deliberately keeps no such constraint, since it also has to
+    # represent an already-anonymized row (TASKS.md #17) whose `contact`
+    # was intentionally blanked to "" -- the constraint only belongs at
+    # this intake boundary.
+    with pytest.raises(ValidationError):
+        RideRequestCreate(**_create_payload(**{field: ""}))
+
+
+def test_ride_request_itself_still_accepts_an_anonymized_blank_contact():
+    # app/store.py's _from_orm() reconstructs a RideRequest straight from
+    # a stored row, including an already-anonymized one -- this must keep
+    # working after the intake-side fix above.
+    req = RideRequest(
+        rider_id="rider-anonymized",
+        origin=Location(lat=38.8462, lng=-77.3064),
+        destination=Location(lat=38.9586, lng=-77.3570),
+        schedule=_one_off_schedule(),
+        contact="",
+    )
+    assert req.contact == ""

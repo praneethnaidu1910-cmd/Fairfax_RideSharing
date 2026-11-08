@@ -64,6 +64,30 @@ def test_create_request_rejects_impossible_coordinates():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_empty_contact():
+    # app/schemas.py's RideRequestCreate now requires a non-empty contact
+    # -- before this, an empty string was accepted (201), stored, and
+    # would reach a real match untouched: the matched counterpart's
+    # reveal would show an empty Contact line, with no way to actually
+    # reach the other rider, silently defeating SCOPE.md's whole stated
+    # reason for collecting this field in the first place.
+    payload = _one_off_payload("rider-no-contact", FAIRFAX, ALDIE, 120, 30, contact="")
+
+    with TestClient(app) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_create_request_rejects_empty_rider_id():
+    payload = _one_off_payload("", FAIRFAX, ALDIE, 120, 30, contact="555-0000")
+
+    with TestClient(app) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_list_requests_never_includes_precise_location_or_contact():
     payload = _one_off_payload(
         "rider-privacy-test-2", FAIRFAX, ALDIE, 120, 30, contact="555-8888-secret"
