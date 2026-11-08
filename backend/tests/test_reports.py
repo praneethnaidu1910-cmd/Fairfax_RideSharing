@@ -112,6 +112,21 @@ def test_post_report_with_empty_reason_is_rejected():
     assert _row_count(make_session_factory(), created["id"]) == 0
 
 
+def test_post_report_with_whitespace_only_reason_is_rejected():
+    # Same gap as app/schemas.py's RideRequestCreate fields -- a
+    # whitespace-only reason has length >= 1, so a plain min_length=1
+    # constraint doesn't catch it, even though it's exactly as useless as
+    # the empty string the test above already rejects.
+    payload = _one_off_payload("rider-report-blank-reason", contact="555-0605")
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        response = client.post(f"/requests/{created['id']}/report", json={"reason": "   "})
+
+    assert response.status_code == 422
+    assert _row_count(make_session_factory(), created["id"]) == 0
+
+
 def test_report_never_appears_in_any_public_response():
     payload = _one_off_payload("rider-report-privacy", contact="555-0604")
     secret_reason = "very-specific-harassment-detail-xyz"

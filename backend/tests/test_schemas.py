@@ -168,6 +168,29 @@ def test_ride_request_create_rejects_empty_rider_id_or_contact(field):
         RideRequestCreate(**_create_payload(**{field: ""}))
 
 
+@pytest.mark.parametrize("field", ["rider_id", "contact"])
+@pytest.mark.parametrize("blank", [" ", "   ", "\t", "\n "])
+def test_ride_request_create_rejects_whitespace_only_rider_id_or_contact(field, blank):
+    # Field(min_length=1) alone isn't enough -- a whitespace-only string
+    # has length >= 1, so it sailed through the fix above untouched.
+    # Confirmed this was real: RideRequestCreate(rider_id="   ", ...,
+    # contact="   ") validated cleanly before this test existed, and a
+    # live POST /requests with the same payload returned 201 -- the exact
+    # "Matched! Your ride partner, :" / blank Contact line gap the
+    # non-empty fix above was supposed to close, just one whitespace
+    # character away from it.
+    with pytest.raises(ValidationError):
+        RideRequestCreate(**_create_payload(**{field: blank}))
+
+
+def test_ride_request_create_keeps_incidental_surrounding_whitespace_on_a_real_value():
+    # The fix rejects blank-after-stripping input, but doesn't itself
+    # strip a value that has real content -- "John" typed with a stray
+    # leading/trailing space is still "John", not an error.
+    req = RideRequestCreate(**_create_payload(rider_id=" John "))
+    assert req.rider_id == " John "
+
+
 def test_ride_request_itself_still_accepts_an_anonymized_blank_contact():
     # app/store.py's _from_orm() reconstructs a RideRequest straight from
     # a stored row, including an already-anonymized one -- this must keep

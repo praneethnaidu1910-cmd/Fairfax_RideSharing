@@ -61,6 +61,42 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 27. Reject a whitespace-only rider_id/contact/report-reason too, not just the empty string
+- Not a numbered "Up next" item -- this evening run went looking for a
+  real bug the same way the last several runs did, since "Up next" only
+  has tasks 13/19 on it and both are manual-only, and found a gap right
+  next to the one this morning's run (task 26) just closed.
+- Task 26's `Field(min_length=1)` fix checks string *length*, not
+  content -- a whitespace-only value like `"   "` has length 3, so it
+  sailed straight through untouched. Confirmed this was real, not
+  theoretical, with a live `TestClient` call before writing any fix:
+  `POST /requests` with `rider_id="   "` and `contact="    "` returned
+  `201` and stored both fields exactly as typed -- the identical
+  "Matched! Your ride partner, :" / blank Contact line failure task 26
+  was supposed to close, just one whitespace character away from it.
+  `AbuseReportCreate.reason` (task 16) had the exact same
+  `Field(min_length=1)` shape and the exact same gap -- a report whose
+  `reason` is `"   "` is "stored," but exactly as uninformative as the
+  empty string that field already rejects.
+- Fix: `app/schemas.py`'s new `NonBlankStr` (`Annotated[str,
+  Field(min_length=1), AfterValidator(_reject_blank)]`) rejects a value
+  that's empty *after* `.strip()`, not just literally zero-length --
+  replaces the bare `Field(min_length=1)` on `RideRequestCreate.rider_id`/
+  `contact` and `AbuseReportCreate.reason`. Doesn't strip the stored
+  value itself -- a real value with incidental surrounding whitespace
+  (`" John "`) is left exactly as typed, only genuinely blank input is
+  rejected. Left `RideRequest`/`AbuseReport` (the internal/stored shapes)
+  untouched, same reasoning as task 26: `RideRequest` has to keep
+  accepting an already-anonymized row's deliberately-blanked `contact`.
+- Tests: `tests/test_schemas.py` adds a parametrized whitespace-variant
+  case (space, multiple spaces, tab, newline-plus-space) for both
+  `rider_id` and `contact`, plus one proving a real value's surrounding
+  whitespace is preserved, not stripped. `tests/test_requests_api.py` adds
+  the HTTP-level reproduction -- the exact `"   "`/`"    "` payload above
+  now `422`s. `tests/test_reports.py` adds the same case for
+  `AbuseReportCreate.reason`. Full suite: 147 tests, up from 136, all
+  green.
+
 ### 26. Reject an empty rider_id/contact at intake instead of silently matching on them
 - Not a numbered "Up next" item -- same pattern as the last several
   entries here: "Up next" only has tasks 13/19 on it and both are

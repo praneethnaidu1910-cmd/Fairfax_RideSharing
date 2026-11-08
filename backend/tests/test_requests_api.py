@@ -88,6 +88,21 @@ def test_create_request_rejects_empty_rider_id():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_whitespace_only_rider_id_or_contact():
+    # Field(min_length=1) alone didn't catch this -- a whitespace-only
+    # string still has length >= 1. Confirmed this was real before the
+    # fix: this exact payload returned 201, stored a rider_id/contact that
+    # look blank to anyone who ever sees them (the matched counterpart's
+    # reveal included), the same gap the empty-string fix above was
+    # supposed to close.
+    payload = _one_off_payload("   ", FAIRFAX, ALDIE, 120, 30, contact="   ")
+
+    with TestClient(app) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_list_requests_never_includes_precise_location_or_contact():
     payload = _one_off_payload(
         "rider-privacy-test-2", FAIRFAX, ALDIE, 120, 30, contact="555-8888-secret"

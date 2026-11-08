@@ -1,11 +1,33 @@
 from datetime import datetime, time
 from enum import Enum
-from typing import Optional, Union
+from typing import Annotated, Optional, Union
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 
 from app.geo import h3_cell
+
+
+def _reject_blank(value: str) -> str:
+    """Field(min_length=1) alone lets a whitespace-only string ("   ")
+    through -- its length is >= 1, even though it's exactly as useless as
+    the empty string that validator is meant to catch. Used below for
+    every field whose whole point is reaching a real person (rider_id,
+    contact, an abuse report's reason): a blank-but-not-technically-empty
+    value would sail through intake the same way plain "" used to before
+    the Field(min_length=1) fix, defeating the same purpose that fix
+    closed. Doesn't strip the value -- a legitimately non-blank string
+    with incidental leading/trailing whitespace (" John ") is left as the
+    rider typed it, not normalized."""
+    if not value.strip():
+        raise ValueError("must not be empty or whitespace-only")
+    return value
+
+
+# A string that must have real, non-whitespace content -- not just a
+# non-empty one. See _reject_blank's own docstring for why Field(min_length=1)
+# alone isn't enough here.
+NonBlankStr = Annotated[str, Field(min_length=1), AfterValidator(_reject_blank)]
 
 
 class Location(BaseModel):
@@ -114,21 +136,22 @@ class RideRequestCreate(BaseModel):
     RideRequest assigns itself, so a client can't hand a request in as
     already `matched`."""
 
-    # min_length=1 on both: an empty rider_id or contact used to be
-    # accepted here and would reach a match untouched -- the matched
-    # counterpart's reveal (app/web.py's mine.html / app/static/live.js)
-    # would then show "Matched! Your ride partner, :" and an empty Contact
-    # line, silently defeating SCOPE.md's whole stated reason for
-    # collecting `contact` ("so a matched pair can reach each other").
-    # Enforced here, at intake, rather than on RideRequest itself, since
-    # that shape also has to represent an already-anonymized stored row
-    # (TASKS.md #17), which blanks `contact` to "" on purpose.
-    rider_id: str = Field(min_length=1)
+    # NonBlankStr on both: an empty (or, see _reject_blank, whitespace-only)
+    # rider_id or contact used to be accepted here and would reach a match
+    # untouched -- the matched counterpart's reveal (app/web.py's
+    # mine.html / app/static/live.js) would then show "Matched! Your ride
+    # partner, :" and a blank Contact line, silently defeating SCOPE.md's
+    # whole stated reason for collecting `contact` ("so a matched pair can
+    # reach each other"). Enforced here, at intake, rather than on
+    # RideRequest itself, since that shape also has to represent an
+    # already-anonymized stored row (TASKS.md #17), which blanks `contact`
+    # to "" on purpose.
+    rider_id: NonBlankStr
     origin: Location
     destination: Location
     schedule: Union[OneOffSchedule, RecurringSchedule]
     seats_needed: int = Field(default=1, ge=1)
-    contact: str = Field(min_length=1)
+    contact: NonBlankStr
 
 
 class AbuseReportCreate(BaseModel):
@@ -139,7 +162,11 @@ class AbuseReportCreate(BaseModel):
     list without ever posting a request of their own can still report
     something they saw."""
 
-    reason: str = Field(min_length=1)
+    # NonBlankStr, not just Field(min_length=1) -- see _reject_blank's
+    # docstring: a whitespace-only reason ("   ") would otherwise be
+    # "stored" in name only, no more useful than the empty string this
+    # field is already supposed to reject.
+    reason: NonBlankStr
     reporter_request_id: Optional[UUID] = None
 
 
