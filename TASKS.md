@@ -61,6 +61,42 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 25. Stop one bad request from permanently killing the live-matching pipeline
+- Not a numbered "Up next" item -- "Up next" only has tasks 13 and 19 on it
+  right now and both are manual-only, so this morning run went looking for
+  a real bug the same way the last few runs did, and found one in
+  `MatchingEngine.run_forever()`: the background task FastAPI starts once
+  at app startup, with nothing that ever restarts it.
+- `run_forever()`'s loop called `self.on_new_request(request)` inside a
+  `try`/`finally` with no `except` -- `finally` ran `incoming.task_done()`
+  either way, but any exception (a transient DB error from `store.save()`,
+  or anything else unexpected) still propagated straight out of the `while
+  True` loop and ended the task for good. Confirmed this was real, not
+  theoretical: wrote a script that starts `run_forever()`, monkeypatches
+  `on_new_request` to raise once, submits that request, then submits a
+  second, completely normal one -- the task was dead
+  (`task.done() == True`) after the first exception, and the second
+  request just sat in `incoming` forever, `qsize() == 1`, never matched.
+  `POST /requests` would still return `201` the whole time, since that
+  response never depended on matching actually happening -- a caller
+  would have no way to tell the entire live-matching pipeline had quietly
+  died until they noticed nobody was ever matching again.
+- Fix: wrap the loop body in `except Exception` that logs
+  (`logger.exception(...)`) and moves on to the next queued request,
+  instead of letting the exception escape the `while True` loop. The one
+  request involved in a failure is dropped from that pass, not retried --
+  retrying/backoff would be a bigger, separate design question than "the
+  pipeline must not die," so I didn't build that here.
+- Tests: new `tests/test_engine.py::test_run_forever_survives_on_new_request_raising`
+  monkeypatches `on_new_request` to raise on the first call, then submits
+  a real rider-1/rider-7 pair after it and asserts they still match on the
+  same still-running worker (`not worker.done()`). Ran this test against
+  the pre-fix code first to make sure it actually catches the regression
+  -- without the fix it hangs forever on `await engine.incoming.join()`
+  (the worker dies after the first item, so `task_done()` never gets
+  called for the later ones), instead of just failing fast; with the fix,
+  it passes normally. Full suite: 131 tests, up from 130, all green.
+
 ### 24. Reject physically-impossible coordinates in the dispatch module too
 - Not a numbered "Up next" item -- "Up next" only has tasks 13 and 19 on it
   right now and both are explicitly manual-only, so this evening run went

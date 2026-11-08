@@ -305,3 +305,44 @@ async def test_run_forever_broadcasts_match_to_every_subscriber():
     # The pre-existing single-subscriber queue still gets it too -- nothing
     # about adding subscribe() should regress it.
     assert engine.matches.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_run_forever_survives_on_new_request_raising(monkeypatch):
+    # Confirmed this was real, not theoretical, before the fix: without a
+    # try/except around on_new_request() inside the loop, an exception
+    # (e.g. a transient DB error from store.save()) propagated out of
+    # run_forever() and ended the background task for good -- every
+    # request submitted after the failing one just sat in `incoming`
+    # forever, never matched, with nothing telling a caller the pipeline
+    # had died. This proves the opposite: one request's on_new_request()
+    # raising doesn't stop the next, unrelated request from matching
+    # normally on the same still-running worker.
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+
+    original_on_new_request = engine.on_new_request
+    calls = {"n": 0}
+
+    def flaky_on_new_request(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated transient failure")
+        return original_on_new_request(request)
+
+    monkeypatch.setattr(engine, "on_new_request", flaky_on_new_request)
+
+    worker = asyncio.create_task(engine.run_forever())
+    await engine.submit(by_rider["rider-6"])  # calls[1] -- raises, dropped
+    await engine.submit(by_rider["rider-1"])  # calls[2] -- real matching resumes
+    await engine.submit(by_rider["rider-7"])  # calls[3] -- matches rider-1
+    await engine.incoming.join()
+
+    assert not worker.done(), "run_forever() must not die from one bad request"
+    worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await worker
+
+    assert engine.matches.qsize() == 1
+    match = engine.matches.get_nowait()
+    assert set(match.request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}

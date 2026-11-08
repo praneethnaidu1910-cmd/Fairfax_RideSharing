@@ -13,6 +13,7 @@ plus incremental matching (#5) below.
 """
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 from uuid import UUID
@@ -30,6 +31,8 @@ from app.schemas import MatchGroup, OneOffSchedule, RequestStatus, RideRequest
 
 if TYPE_CHECKING:
     from app.store import RequestStore
+
+logger = logging.getLogger(__name__)
 
 # A typical sedan's usable passenger capacity for a shared ride -- the
 # "vehicle/trip capacity" docs/MATCHING_ALGORITHM.md's hard constraint
@@ -253,7 +256,21 @@ class MatchingEngine:
         on_new_request() (never a full recompute) and publishing any
         resulting match to `matches` plus every subscribe()'d queue. Runs
         until cancelled -- intended to be launched as a background task,
-        e.g. by TASKS.md #6's app startup and by #8's simulator."""
+        e.g. by TASKS.md #6's app startup and by #8's simulator.
+
+        on_new_request() failing for one request (e.g. a transient DB
+        error from store.save()) must not take the whole loop down -- this
+        task is started once, at app startup, with nothing that restarts
+        it, so an unguarded exception here used to propagate out of
+        run_forever() entirely and silently end the background task for
+        good: every request submitted after that point would just sit in
+        `incoming` forever, never matched, with POST /requests still
+        returning 201 as if nothing were wrong. Catching broad Exception
+        and logging it, instead of letting it escape the loop, keeps the
+        pipeline itself alive for every request after the failing one --
+        the one request involved in the failure is dropped from this
+        pass, not retried.
+        """
         while True:
             request = await self.incoming.get()
             try:
@@ -261,5 +278,10 @@ class MatchingEngine:
                     await self.matches.put(match)
                     for subscriber in self._subscribers:
                         await subscriber.put(match)
+            except Exception:
+                logger.exception(
+                    "on_new_request failed for request %s -- dropping it, pipeline stays up",
+                    request.id,
+                )
             finally:
                 self.incoming.task_done()
