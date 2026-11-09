@@ -204,6 +204,32 @@ class MatchingEngine:
             self._unmatched.append(request)
             return []
 
+        # best_candidate came from the self._unmatched pool read above, but
+        # scoring it took a while (every candidate in the bucket, every
+        # window pair) with nothing holding this up -- and
+        # POST /requests/{id}/cancel's cancel_request() (app/router.py) is a
+        # sync FastAPI route, which Starlette runs on a threadpool worker,
+        # not this event loop, so it can run its own store.save(CANCELLED)
+        # + remove_from_pool() for this exact best_candidate at any point
+        # during that scoring. Without this recheck, the code below would
+        # still flip best_candidate back to MATCHED and store.save() it --
+        # silently reverting a cancel the poster already got a 200 for, and
+        # self._unmatched.remove(best_candidate) right after would raise
+        # ValueError, since remove_from_pool() already dropped it. Confirmed
+        # this was real, not theoretical: a script that pauses
+        # on_new_request() mid-scoring (monkeypatching this module's
+        # compatibility_score), runs the real cancel_request() sequence
+        # against best_candidate from another thread in that window, then
+        # lets scoring finish -- without this check, best_candidate's
+        # stored status came back MATCHED (not CANCELLED) and
+        # self._unmatched.remove() raised.
+        if self._store is not None:
+            current_candidate = self._store.get(best_candidate.id)
+            if current_candidate is not None and current_candidate.status != RequestStatus.OPEN:
+                self._unmatched = [r for r in self._unmatched if r.id != best_candidate.id]
+                self._unmatched.append(request)
+                return []
+
         matched_at = datetime.utcnow()
         request.status = RequestStatus.MATCHED
         best_candidate.status = RequestStatus.MATCHED

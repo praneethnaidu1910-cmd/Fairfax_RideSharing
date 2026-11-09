@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import threading
 from datetime import datetime, timedelta
 
 import pytest
@@ -363,6 +364,77 @@ async def test_run_forever_survives_on_new_request_raising(monkeypatch):
     assert engine.matches.qsize() == 1
     match = engine.matches.get_nowait()
     assert set(match.request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}
+
+
+def test_on_new_request_does_not_revert_a_cancel_of_its_own_best_candidate(monkeypatch):
+    # A different race than test_run_forever_does_not_match_a_request_
+    # cancelled_while_still_queued above: that one covers a request still
+    # sitting in `incoming`. This one covers a request already sitting in
+    # self._unmatched (pooled, scoreable) that gets cancelled *while*
+    # on_new_request() is in the middle of scoring it as the best
+    # candidate for a brand-new incoming request -- POST
+    # /requests/{id}/cancel's cancel_request() (app/router.py) is a sync
+    # FastAPI route, which Starlette dispatches to a threadpool worker, not
+    # the event loop this engine's on_new_request() runs on, so the two
+    # really can overlap. Forces that exact interleaving deterministically
+    # by pausing on_new_request() mid-scoring (via a monkeypatched
+    # compatibility_score, called while best_candidate is still being
+    # decided), running the real cancel sequence against the pool's only
+    # candidate from another thread, then letting on_new_request() resume
+    # into its post-scoring recheck.
+    session_factory = make_session_factory()
+    store = RequestStore(session_factory)
+    engine = MatchingEngine(store=store)
+
+    candidate = _store_backed_request("rider-pool-race-candidate", 38.8462, -77.3064)
+    incoming = _store_backed_request("rider-pool-race-incoming", 38.8500, -77.3100)
+    store.add(candidate)
+    store.add(incoming)
+    engine._unmatched.append(candidate)
+
+    reached = threading.Event()
+    release = threading.Event()
+    real_score = engine_module.compatibility_score
+
+    def pausing_score(*args, **kwargs):
+        if not reached.is_set():
+            reached.set()
+            release.wait(timeout=5)
+        return real_score(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "compatibility_score", pausing_score)
+
+    result: dict = {}
+
+    def run_on_new_request():
+        try:
+            result["matches"] = engine.on_new_request(incoming)
+        except Exception as exc:  # pragma: no cover -- only hit pre-fix
+            result["exception"] = exc
+
+    worker = threading.Thread(target=run_on_new_request)
+    worker.start()
+    assert reached.wait(timeout=5), "on_new_request never reached scoring"
+
+    # Mirrors router.py's cancel_request() exactly, run concurrently from
+    # what's really a separate thread in production: a fresh copy flips to
+    # CANCELLED and saves, then drops out of the pool.
+    fresh_candidate = store.get(candidate.id)
+    fresh_candidate.status = RequestStatus.CANCELLED
+    fresh_candidate.status_changed_at = datetime.utcnow()
+    store.save(fresh_candidate)
+    engine.remove_from_pool(candidate.id)
+
+    release.set()
+    worker.join(timeout=5)
+
+    assert "exception" not in result, f"on_new_request raised: {result.get('exception')!r}"
+    assert result["matches"] == []
+    assert store.get(candidate.id).status == RequestStatus.CANCELLED
+    assert store.get(candidate.id).matched_with is None
+    assert store.get(incoming.id).status == RequestStatus.OPEN
+    assert incoming in engine._unmatched
+    assert candidate not in engine._unmatched
 
 
 @pytest.mark.asyncio

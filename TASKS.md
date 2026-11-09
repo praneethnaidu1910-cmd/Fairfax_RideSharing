@@ -61,6 +61,64 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 29. Stop a pool-sitting request's cancel from getting silently reverted by a match that's already mid-flight
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found a close cousin of the race
+  task 28 (this morning) just closed: same cancel-vs-match race, but the
+  *other* side of it.
+- Task 28 covered a request still sitting in `incoming`, queued by
+  `submit()` but not yet drained by `run_forever()`, getting cancelled out
+  from under it. This is the other window: a request already sitting in
+  `self._unmatched` (pooled, a real match candidate for whatever arrives
+  next) getting cancelled *while* `on_new_request()` is in the middle of
+  scoring it as the best candidate for a brand-new incoming request.
+  `POST /requests/{id}/cancel`'s `cancel_request()` (`app/router.py`) is a
+  plain sync `def`, which Starlette dispatches to a threadpool worker, not
+  the event loop `on_new_request()` runs on -- so the two really can run at
+  the same time, not just interleave cooperatively. First suspected this
+  reading the router/engine code side by side; ruled out the "two threads
+  mutating `self._unmatched` at once" angle with an actual multi-thousand-
+  trial stress script first (CPython's list iterator is live, not a
+  snapshot, so a plain append/filter-and-reassign pair turned out *not* to
+  lose data the way I first guessed), then found the *logical* race was
+  real: wrote a script that pauses `on_new_request()` mid-scoring (via a
+  monkeypatched `compatibility_score`, which releases the GIL on every
+  call anyway) with a real, store-backed cancel running against its only
+  candidate in the gap, then lets scoring finish -- without a fix, the
+  candidate's own DB row came back `MATCHED` (reverting the cancel a caller
+  already got a `200` for) and `self._unmatched.remove(best_candidate)`
+  raised `ValueError` right after (caught by task 25's `run_forever()`
+  guard in production, so the pipeline survives, but silently -- the match
+  event never gets published, and nothing tells anyone the DB now
+  disagrees with the cancel that just happened). Worse than just a
+  dropped event: since `store.save()` runs *before* the failing
+  `self._unmatched.remove()`, the DB write already landed -- a second
+  rider's own page (`app/web.py`'s `/mine/{id}`) reading straight from the
+  store afterward would show a reveal naming the cancelled rider's real
+  contact/location, even though that rider thinks they successfully
+  withdrew.
+- Fix: `on_new_request()` now re-reads `best_candidate`'s current status
+  from the store (when one is configured) right after scoring decides on
+  it, before touching anything -- mirrors the exact recheck task 28 added
+  to `run_forever()`, just on the other request in the pair. If the store
+  says `best_candidate` is no longer `OPEN`, it's dropped from
+  `self._unmatched` (it was never going to be matchable anyway) and
+  `request` is treated as a non-match this round -- pooled for the next
+  arrival, same as any other no-candidate-found case, rather than trying
+  to retry against whatever's left in the same pass.
+- Tests: new
+  `tests/test_engine.py::test_on_new_request_does_not_revert_a_cancel_of_its_own_best_candidate`
+  forces the exact interleaving deterministically (no sleeps, no
+  probabilistic retries) with a monkeypatched `compatibility_score` plus
+  two `threading.Event`s: pause scoring, run the real cancel sequence
+  against the pooled candidate from another thread, release, assert no
+  exception, the candidate stays `CANCELLED` with no `matched_with`, and
+  the incoming request ends up pooled rather than matched. Ran this test
+  against the pre-fix code first to confirm it actually fails there (the
+  same `ValueError` the manual script hit), not just that it passes now.
+  Full suite: 149 tests, up from 148, all green.
+
 ### 28. Stop a request cancelled while still queued from getting silently matched anyway
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug
