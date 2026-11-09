@@ -4,16 +4,33 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from app.db import make_session_factory
 from app.matching import engine as engine_module
 from app.matching.engine import DEFAULT_VEHICLE_CAPACITY, MatchingEngine
 from app.sample_data import SAMPLE_REQUESTS
 from app.schemas import Location, OneOffSchedule, RequestStatus, RideRequest
+from app.store import RequestStore
 
 
 def _sample_copy() -> list[RideRequest]:
     # match_batch() mutates .status in place -- copy so other test modules
     # importing the shared SAMPLE_REQUESTS list aren't affected.
     return [r.model_copy(deep=True) for r in SAMPLE_REQUESTS]
+
+
+def _store_backed_request(rider_id: str, lat: float, lng: float) -> RideRequest:
+    earliest = datetime.utcnow() + timedelta(hours=1)
+    return RideRequest(
+        rider_id=rider_id,
+        origin=Location(lat=lat, lng=lng),
+        destination=Location(lat=38.9757, lng=-77.6122),
+        schedule=OneOffSchedule(
+            earliest_departure=earliest,
+            latest_departure=earliest + timedelta(minutes=30),
+        ),
+        seats_needed=1,
+        contact="555-0199",
+    )
 
 
 def test_match_batch_matches_close_same_direction_pair():
@@ -346,3 +363,53 @@ async def test_run_forever_survives_on_new_request_raising(monkeypatch):
     assert engine.matches.qsize() == 1
     match = engine.matches.get_nowait()
     assert set(match.request_ids) == {by_rider["rider-1"].id, by_rider["rider-7"].id}
+
+
+@pytest.mark.asyncio
+async def test_run_forever_does_not_match_a_request_cancelled_while_still_queued():
+    # TASKS.md #15's acceptance criterion is "a cancelled request can't
+    # win a later match" -- test_a_cancelled_pooled_request_cannot_win_a_
+    # later_match_slot above covers that for a request already sitting in
+    # self._unmatched, which is all remove_from_pool() (called by
+    # router.py's cancel_request()) can reach. This covers the gap right
+    # next to it: a request can also be cancelled while it's still
+    # sitting in `incoming`, queued by submit() but not yet drained by
+    # this loop -- remove_from_pool() is a no-op for it (it was never
+    # pooled), and the object sitting in `incoming` is a different Python
+    # instance than the fresh one store.get()/cancel_request() mutated, so
+    # its in-memory .status is still OPEN. Confirmed this was real, not
+    # theoretical, before the fix in run_forever() that re-checks the
+    # store: without it, this test's rider-a came back MATCHED, with its
+    # CANCELLED status silently overwritten.
+    session_factory = make_session_factory()
+    store = RequestStore(session_factory)
+    engine = MatchingEngine(store=store)
+
+    rider_a = _store_backed_request("rider-cancel-race-a", 38.8462, -77.3064)
+    rider_b = _store_backed_request("rider-cancel-race-b", 38.8500, -77.3100)
+    store.add(rider_a)
+    store.add(rider_b)
+
+    worker = asyncio.create_task(engine.run_forever())
+    try:
+        await engine.submit(rider_a)
+
+        # Mirrors router.py's cancel_request(): a fresh copy, not the
+        # object just submitted, gets flipped to CANCELLED and saved,
+        # then dropped from the pool (a no-op -- it isn't pooled yet).
+        fresh_a = store.get(rider_a.id)
+        fresh_a.status = RequestStatus.CANCELLED
+        fresh_a.status_changed_at = datetime.utcnow()
+        store.save(fresh_a)
+        engine.remove_from_pool(rider_a.id)
+
+        await engine.submit(rider_b)
+        await engine.incoming.join()
+    finally:
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
+
+    assert store.get(rider_a.id).status == RequestStatus.CANCELLED
+    assert store.get(rider_a.id).matched_with is None
+    assert store.get(rider_b.id).status == RequestStatus.OPEN

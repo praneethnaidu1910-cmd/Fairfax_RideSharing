@@ -61,6 +61,56 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 28. Stop a request cancelled while still queued from getting silently matched anyway
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug
+  the same way the last several runs did, and found one right next to the
+  one task 25 closed in `run_forever()`.
+- Task 25 made the matching pipeline survive one bad request; this is a
+  different bug in the same loop. `remove_from_pool()` (task 15's cancel
+  path) only drops a request from `self._unmatched` -- it can't do
+  anything about a request still sitting in `incoming`, queued by
+  `submit()` but not yet drained by `run_forever()`. That window is real:
+  `POST /requests` calls `engine.submit()` and returns immediately,
+  without waiting for the background worker to actually process the
+  item. `POST /requests/{id}/cancel` (`app/router.py`) fetches a *fresh*
+  `RideRequest` from the store (`store.get()` always builds a new
+  instance), flips that copy to `cancelled`, and saves it -- but the
+  object still sitting in `incoming` is a different Python instance
+  entirely, whose in-memory `.status` never left `open`.
+  `remove_from_pool()` no-ops for it since it was never pooled, so when
+  `run_forever()` finally reaches it, `on_new_request()` happily matches
+  it against someone else and `store.save()`s it right back to `matched`
+  -- silently overwriting the `cancelled` status the poster had already
+  gotten back a `200` for, and revealing their location/contact to a
+  stranger they'd explicitly tried to withdraw from. Confirmed this was
+  real, not theoretical, with a script that submits a request, cancels it
+  the same way the real endpoint does (fresh copy from the store, not the
+  queued object), submits a second compatible one, then lets
+  `run_forever()` run -- the cancelled request came back `matched` every
+  time before the fix.
+- Fix: `run_forever()` now re-checks the request's *current* status in
+  the store (when one is configured) the moment it dequeues it from
+  `incoming`, before calling `on_new_request()` at all -- if the store
+  says it's no longer `open` (cancelled, or anything else), it's skipped
+  outright instead of being pooled or matched. Scoped to `run_forever()`
+  itself rather than `on_new_request()`, since the gap is specifically
+  about trusting a possibly-stale queued object over the store's live
+  state, not about `on_new_request()`'s own logic (its existing tests
+  construct it without a store and still rely on the passed-in object's
+  status being authoritative, which is still true for every caller that
+  isn't this one race).
+- Tests: new
+  `tests/test_engine.py::test_run_forever_does_not_match_a_request_cancelled_while_still_queued`
+  reproduces the race directly against a real store/engine pair (submit,
+  cancel via a fresh store copy the way the endpoint does, submit a
+  second compatible request, let the worker drain both) and asserts the
+  cancelled request stays `cancelled` with no `matched_with`, and the
+  other request stays `open` rather than getting matched to a
+  ghost. Ran it against the pre-fix code first to confirm it actually
+  fails there (`cancelled` != `matched`), not just that it passes now.
+  Full suite: 148 tests, up from 147, all green.
+
 ### 27. Reject a whitespace-only rider_id/contact/report-reason too, not just the empty string
 - Not a numbered "Up next" item -- this evening run went looking for a
   real bug the same way the last several runs did, since "Up next" only

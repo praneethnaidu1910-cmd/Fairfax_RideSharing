@@ -270,10 +270,32 @@ class MatchingEngine:
         pipeline itself alive for every request after the failing one --
         the one request involved in the failure is dropped from this
         pass, not retried.
+
+        Also re-checks the request's status against the store (when one is
+        configured) before touching it at all. submit() hands this loop
+        the exact RideRequest object POST /requests built, and that object
+        sits in `incoming` until this loop gets around to it -- if
+        POST /requests/{id}/cancel runs in that window, it mutates a
+        *different*, freshly-fetched RideRequest instance (store.get()
+        always returns a fresh one) and calls remove_from_pool(), which
+        only drops a request that's already in self._unmatched. A request
+        still waiting in `incoming` isn't in self._unmatched yet, so
+        remove_from_pool() was a no-op for it, and on_new_request() would
+        go on to match (and store.save() back to MATCHED) a request the
+        store already had as CANCELLED -- confirmed this was real, not
+        theoretical, before this fix: submit a request, cancel it via the
+        store the same way the cancel endpoint does, then let this loop
+        reach it, and the cancelled row came back MATCHED. Treating
+        anything that's no longer OPEN in the store as "already handled
+        elsewhere" and skipping it closes that gap.
         """
         while True:
             request = await self.incoming.get()
             try:
+                if self._store is not None:
+                    current = self._store.get(request.id)
+                    if current is not None and current.status != RequestStatus.OPEN:
+                        continue
                 for match in self.on_new_request(request):
                     await self.matches.put(match)
                     for subscriber in self._subscribers:
