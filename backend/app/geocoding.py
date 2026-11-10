@@ -15,6 +15,7 @@ The real endpoint gets verified by hand, once, in an interactive session
 with normal network access, per that same note.
 """
 
+import threading
 import time
 
 import httpx
@@ -41,6 +42,19 @@ REQUEST_TIMEOUT_SECONDS = 5.0
 MIN_SECONDS_BETWEEN_REQUESTS = 1.0
 
 _last_request_at: float = 0.0
+# GET /geocode (app/router.py) is a sync route, which Starlette dispatches
+# to a threadpool worker, not a single event loop -- two riders blurring a
+# place field at close to the same moment really can call
+# _wait_for_rate_limit() from two different threads at once. Without a
+# lock, both read the same stale _last_request_at, both compute the same
+# "elapsed", and both sleep the same (possibly zero) amount before firing
+# their real Nominatim call -- landing the two actual HTTP requests
+# milliseconds apart instead of >=1s apart, the exact thing this function
+# exists to prevent. Confirmed this was a real race, not theoretical, with
+# a script that releases several threads at once via a barrier and checks
+# the gap between their actual "requests" -- without the lock, five
+# threads all landed within ~0.3ms of each other.
+_rate_limit_lock = threading.Lock()
 
 
 class PlaceNotFoundError(ValueError):
@@ -51,10 +65,11 @@ class PlaceNotFoundError(ValueError):
 
 def _wait_for_rate_limit() -> None:
     global _last_request_at
-    elapsed = time.monotonic() - _last_request_at
-    if elapsed < MIN_SECONDS_BETWEEN_REQUESTS:
-        time.sleep(MIN_SECONDS_BETWEEN_REQUESTS - elapsed)
-    _last_request_at = time.monotonic()
+    with _rate_limit_lock:
+        elapsed = time.monotonic() - _last_request_at
+        if elapsed < MIN_SECONDS_BETWEEN_REQUESTS:
+            time.sleep(MIN_SECONDS_BETWEEN_REQUESTS - elapsed)
+        _last_request_at = time.monotonic()
 
 
 def geocode_place(place_name: str) -> Location:

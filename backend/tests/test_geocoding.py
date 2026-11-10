@@ -6,6 +6,8 @@ mock httpx.get to prove the request-shaping and error-handling logic is
 correct. The real endpoint is verified by hand in an interactive session.
 """
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -102,6 +104,50 @@ def test_rate_limit_waits_at_least_one_second_between_real_calls():
         mock_sleep.assert_called_once()
         (waited,), _ = mock_sleep.call_args
         assert waited == pytest.approx(MIN_SECONDS_BETWEEN_REQUESTS - 0.2)
+
+
+def test_rate_limit_keeps_concurrent_callers_spaced_out_too():
+    # GET /geocode is a sync route, so Starlette can run two calls to
+    # _wait_for_rate_limit() on two different threadpool threads at once --
+    # the single-threaded test above (test_rate_limit_waits_at_least_one_
+    # second_between_real_calls) can't catch a race that only shows up
+    # under real concurrency. Without app.geocoding._rate_limit_lock, every
+    # thread here reads the same stale _last_request_at, computes the same
+    # "elapsed", and proceeds without waiting on each other -- landing all
+    # their real calls within a few milliseconds of each other instead of
+    # MIN_SECONDS_BETWEEN_REQUESTS apart.
+    import app.geocoding as geocoding
+
+    original_min = geocoding.MIN_SECONDS_BETWEEN_REQUESTS
+    test_min = 0.2
+    geocoding.MIN_SECONDS_BETWEEN_REQUESTS = test_min
+    # A "previous call" recent enough that every thread below has to wait
+    # at least a little -- the stale-read race only bites when there's a
+    # real wait to race over (every thread reading "elapsed >= the
+    # minimum" would correctly proceed immediately with or without a lock).
+    geocoding._last_request_at = time.monotonic() - 0.15
+    try:
+        call_times: list[float] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(5)
+
+        def worker() -> None:
+            barrier.wait()
+            geocoding._wait_for_rate_limit()
+            with lock:
+                call_times.append(time.monotonic())
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        geocoding.MIN_SECONDS_BETWEEN_REQUESTS = original_min
+
+    call_times.sort()
+    gaps = [b - a for a, b in zip(call_times, call_times[1:])]
+    assert all(gap >= test_min for gap in gaps)
 
 
 @patch("app.router.geocode_place")

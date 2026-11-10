@@ -61,6 +61,44 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 30. Fix a race in the geocoding rate limiter that let concurrent callers skip the 1-request/second spacing
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, this time in `app/geocoding.py`,
+  which none of the recent bug-hunting passes had touched yet.
+- `GET /geocode` (`app/router.py`) is a plain sync route, which Starlette
+  dispatches to a threadpool worker, not a single event loop -- two riders
+  blurring a pickup/destination field at close to the same moment (both
+  tabs on `/new`, task 11) really can call `_wait_for_rate_limit()` from
+  two different threads at once. The old function read the module-level
+  `_last_request_at`, decided how long to sleep, slept, then wrote
+  `_last_request_at` back -- a classic check-then-act race with no lock
+  around any of it, so two threads doing this concurrently both read the
+  same stale value, both compute the same "elapsed," and both proceed (or
+  both sleep the same amount) without ever seeing each other's in-flight
+  wait. Confirmed this was real, not theoretical, with a script before
+  writing any fix: five threads released at once via a `threading.Barrier`,
+  each calling the real `_wait_for_rate_limit()` -- all five landed their
+  actual "requests" within about 0.3ms of each other instead of
+  `MIN_SECONDS_BETWEEN_REQUESTS` apart, the exact spacing this function
+  exists to guarantee against Nominatim's 1-request/second usage policy.
+- Fix: a module-level `threading.Lock` (`_rate_limit_lock`) now wraps the
+  whole read-sleep-write sequence in `_wait_for_rate_limit()`, so two
+  concurrent callers are forced to actually take turns -- the second one
+  blocks on the lock until the first finishes its sleep and records its
+  call time, then re-reads a now-fresh `_last_request_at` and sleeps the
+  right amount itself, instead of racing off the same stale snapshot.
+- Tests: new
+  `tests/test_geocoding.py::test_rate_limit_keeps_concurrent_callers_spaced_out_too`
+  reproduces the exact scenario above (five threads, a barrier, a shrunk
+  `MIN_SECONDS_BETWEEN_REQUESTS` so the test stays fast) and asserts every
+  consecutive pair of actual call times is at least that far apart. Ran it
+  against the pre-fix code first (by temporarily reverting just
+  `app/geocoding.py`) to confirm it reliably fails there -- it did, on
+  every one of several runs -- and reliably passes with the fix, on every
+  one of several runs, before trusting it as a real regression test and
+  not a flaky one. Full suite: 150 tests, up from 149, all green.
+
 ### 29. Stop a pool-sitting request's cancel from getting silently reverted by a match that's already mid-flight
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the
