@@ -230,6 +230,23 @@ class MatchingEngine:
                 self._unmatched.append(request)
                 return []
 
+        # Same race, the other side of the pair: `request` itself (not yet
+        # pooled -- it's just a local variable at this point, so
+        # remove_from_pool() can't reach it either) can just as easily get
+        # cancelled by its own poster during the exact same scoring window.
+        # Without this recheck, a cancel that already got a 200 back would
+        # get silently reverted to MATCHED below, the same bug as
+        # best_candidate's case above, just on the incoming side instead of
+        # the pooled side. Confirmed this was real, not theoretical, the
+        # same way: pausing on_new_request() mid-scoring and running the
+        # real cancel sequence against `request` (not best_candidate) from
+        # another thread in that window -- without this check, `request`'s
+        # stored status came back MATCHED, not CANCELLED.
+        if self._store is not None:
+            current_request = self._store.get(request.id)
+            if current_request is not None and current_request.status != RequestStatus.OPEN:
+                return []
+
         matched_at = datetime.utcnow()
         request.status = RequestStatus.MATCHED
         best_candidate.status = RequestStatus.MATCHED

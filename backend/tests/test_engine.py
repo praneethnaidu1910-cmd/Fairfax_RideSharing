@@ -437,6 +437,73 @@ def test_on_new_request_does_not_revert_a_cancel_of_its_own_best_candidate(monke
     assert candidate not in engine._unmatched
 
 
+def test_on_new_request_does_not_revert_a_cancel_of_the_incoming_request_itself(monkeypatch):
+    # The third leg of the same triangle: test_run_forever_does_not_match_
+    # a_request_cancelled_while_still_queued covers a request still sitting
+    # in `incoming`, and test_on_new_request_does_not_revert_a_cancel_of_
+    # its_own_best_candidate (just above) covers an already-pooled
+    # candidate getting cancelled mid-scoring. This covers the remaining
+    # gap: the *incoming* request itself -- not yet pooled, so
+    # remove_from_pool() can't reach it either -- getting cancelled by its
+    # own poster during that same scoring window, before on_new_request()
+    # commits a match. Same interleaving trick as the test above, just
+    # cancelling `incoming` instead of `candidate` once scoring is paused.
+    session_factory = make_session_factory()
+    store = RequestStore(session_factory)
+    engine = MatchingEngine(store=store)
+
+    candidate = _store_backed_request("rider-incoming-race-candidate", 38.8462, -77.3064)
+    incoming = _store_backed_request("rider-incoming-race-incoming", 38.8500, -77.3100)
+    store.add(candidate)
+    store.add(incoming)
+    engine._unmatched.append(candidate)
+
+    reached = threading.Event()
+    release = threading.Event()
+    real_score = engine_module.compatibility_score
+
+    def pausing_score(*args, **kwargs):
+        if not reached.is_set():
+            reached.set()
+            release.wait(timeout=5)
+        return real_score(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "compatibility_score", pausing_score)
+
+    result: dict = {}
+
+    def run_on_new_request():
+        try:
+            result["matches"] = engine.on_new_request(incoming)
+        except Exception as exc:  # pragma: no cover -- only hit pre-fix
+            result["exception"] = exc
+
+    worker = threading.Thread(target=run_on_new_request)
+    worker.start()
+    assert reached.wait(timeout=5), "on_new_request never reached scoring"
+
+    # Mirrors router.py's cancel_request() exactly, but against the
+    # incoming request itself -- it isn't pooled yet, so
+    # remove_from_pool() is a no-op here, same as the real race.
+    fresh_incoming = store.get(incoming.id)
+    fresh_incoming.status = RequestStatus.CANCELLED
+    fresh_incoming.status_changed_at = datetime.utcnow()
+    store.save(fresh_incoming)
+    engine.remove_from_pool(incoming.id)
+
+    release.set()
+    worker.join(timeout=5)
+
+    assert "exception" not in result, f"on_new_request raised: {result.get('exception')!r}"
+    assert result["matches"] == []
+    assert store.get(incoming.id).status == RequestStatus.CANCELLED
+    assert store.get(incoming.id).matched_with is None
+    assert store.get(candidate.id).status == RequestStatus.OPEN
+    assert store.get(candidate.id).matched_with is None
+    assert candidate in engine._unmatched
+    assert incoming not in engine._unmatched
+
+
 @pytest.mark.asyncio
 async def test_run_forever_does_not_match_a_request_cancelled_while_still_queued():
     # TASKS.md #15's acceptance criterion is "a cancelled request can't

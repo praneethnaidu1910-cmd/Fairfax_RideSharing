@@ -61,6 +61,50 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 31. Stop on_new_request() from reverting a cancel of the *incoming* request itself, mid-scoring
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found the third leg of a triangle
+  the last two runs already closed two sides of. Task 28 (this morning, two
+  runs ago) covers a request cancelled while still sitting in `incoming`,
+  before `on_new_request()` ever sees it. Task 29 (last evening) covers an
+  already-pooled candidate getting cancelled *while* `on_new_request()` is
+  mid-scoring it against a new incoming request. Neither covers the
+  remaining case: the *incoming* request itself getting cancelled by its
+  own poster during that same scoring window -- it's not in `incoming`
+  anymore (already dequeued) and not in `self._unmatched` yet (not pooled
+  until/unless no match is found), so neither task 28's nor task 29's fix,
+  nor `remove_from_pool()`, has anything to grab onto for it.
+- `on_new_request()` already rechecks `best_candidate`'s current store
+  status right before committing a match (task 29's fix), but never
+  rechecked `request`'s own status the same way -- so a cancel racing the
+  *other* half of the pair sailed straight through untouched. Confirmed
+  this was real, not theoretical, with the same kind of script task 29's
+  own entry describes: pause `on_new_request()` mid-scoring (monkeypatched
+  `compatibility_score`), run the real `cancel_request()` sequence against
+  the *incoming* request (not the candidate) from another thread in that
+  gap, then let scoring finish -- without a fix, the incoming request's
+  stored status came back `MATCHED`, silently overwriting the `CANCELLED`
+  its poster already got a `200` for, with its location/contact revealed
+  to a stranger it explicitly tried to withdraw from matching before the
+  cancel had even made it to disk.
+- Fix: a second recheck, right after `best_candidate`'s, re-reads
+  `request`'s own current status from the store (when one is configured)
+  before touching anything. If it's no longer `OPEN`, `on_new_request()`
+  returns `[]` without matching *and* without pooling it into
+  `self._unmatched` -- a cancelled request has nothing left to pool for.
+  `best_candidate` is left exactly where it was (still in the pool,
+  un-mutated), since it's still a perfectly good open request for whatever
+  arrives next.
+- Tests: new
+  `tests/test_engine.py::test_on_new_request_does_not_revert_a_cancel_of_the_incoming_request_itself`
+  mirrors task 29's own test almost exactly -- same pausing-scorer trick,
+  same real `cancel_request()` sequence -- just run against the incoming
+  request instead of the candidate. Ran it against the pre-fix code first
+  to confirm it actually fails there (`matches == []` assertion fails
+  because a real match came back), not just that it passes now. Full
+  suite: 151 tests, up from 150, all green.
+
 ### 30. Fix a race in the geocoding rate limiter that let concurrent callers skip the 1-request/second spacing
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the
