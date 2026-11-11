@@ -89,3 +89,50 @@ def test_mine_page_unknown_request_id_404s():
         response = client.get("/mine/00000000-0000-0000-0000-000000000000")
 
     assert response.status_code == 404
+
+
+def test_mine_page_shows_cancelled_not_still_waiting_after_cancel():
+    # Before this fix, /mine/{id} never looked at the request's own status
+    # -- a cancelled request (TASKS.md #15) rendered the exact same
+    # "Waiting for a match" message as a genuinely open one, which is
+    # actively misleading: the poster who just cancelled reloads this page
+    # and is told their request is still live.
+    payload = _one_off_payload("rider-mine-cancel", FAIRFAX, ALDIE, 120, 30, contact="555-0601")
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        cancel_response = client.post(f"/requests/{created['id']}/cancel")
+        assert cancel_response.status_code == 200
+
+        page = client.get(f"/mine/{created['id']}")
+
+    assert page.status_code == 200
+    assert "cancelled" in page.text.lower()
+    assert "Waiting for a match" not in page.text
+    # Still never a reveal -- there's no counterpart to reveal for a
+    # cancelled, unmatched request.
+    assert "555-0601" not in page.text
+
+
+def test_mine_page_shows_expired_not_still_waiting_once_window_passes():
+    payload = {
+        "rider_id": "rider-mine-expired",
+        "origin": {"lat": FAIRFAX[0], "lng": FAIRFAX[1]},
+        "destination": {"lat": ALDIE[0], "lng": ALDIE[1]},
+        "schedule": {
+            "earliest_departure": (datetime.utcnow() - timedelta(hours=2)).isoformat(),
+            "latest_departure": (datetime.utcnow() - timedelta(hours=1)).isoformat(),
+        },
+        "seats_needed": 1,
+        "contact": "555-0602",
+    }
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        assert created["status"] == "expired"
+
+        page = client.get(f"/mine/{created['id']}")
+
+    assert page.status_code == 200
+    assert "expired" in page.text.lower()
+    assert "Waiting for a match" not in page.text

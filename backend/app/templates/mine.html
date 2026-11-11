@@ -16,6 +16,10 @@
     <li>Dropoff: {{ reveal.destination.lat }}, {{ reveal.destination.lng }}</li>
   </ul>
 </div>
+{% elif status == "cancelled" %}
+<p id="cancelled-message">You cancelled this request -- it won't be matched.</p>
+{% elif status == "expired" %}
+<p id="expired-message">This request's window has passed -- it won't be matched.</p>
 {% else %}
 <p id="waiting-message">Waiting for a match... this page updates itself, no need to reload.</p>
 <div id="reveal-box" class="request-card" hidden></div>

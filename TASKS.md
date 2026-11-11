@@ -61,6 +61,41 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 32. Stop `/mine/{id}` from telling a cancelled/expired poster their request is still "waiting for a match"
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one in the web frontend
+  this time instead of the matching engine/race-condition territory the
+  last several entries all lived in.
+- `GET /mine/{request_id}` (`app/web.py`) only ever passed the template a
+  `reveal` (the matched counterpart, or `None`) -- never the request's own
+  `status`. `mine.html`'s `{% else %}` branch, meant for "still open, no
+  match yet," was the *only* non-reveal branch, so a cancelled request
+  (TASKS.md #15's `POST /requests/{id}/cancel`) or an expired one (TASKS.md
+  #14) rendered the exact same "Waiting for a match... this page updates
+  itself, no need to reload" message as a genuinely still-open one, and
+  still loaded `live.js` to open a WebSocket that can never receive a match
+  for either. Confirmed this was real, not theoretical, with a live
+  `TestClient` before writing any fix: posted a request, cancelled it
+  through the real cancel endpoint, then reloaded `/mine/<id>` -- "Waiting
+  for a match" was still right there, with nothing on the page telling the
+  poster their own cancel had actually gone through.
+- Fix: `my_request_status()` now also passes `to_public(mine).status.value`
+  -- the same computed status `GET /requests` already reports (so
+  "expired" means the same thing here it means there, no duplicated
+  `is_expired()` logic) -- and `mine.html` gets two new branches ahead of
+  the fallback: `cancelled` and `expired` each get their own plain message,
+  neither one loads `live.js` or opens a pointless WebSocket, and the
+  original "waiting" branch is now reached only for a genuinely still-open
+  request.
+- Tests: `tests/test_live_matches.py` adds
+  `test_mine_page_shows_cancelled_not_still_waiting_after_cancel` and
+  `test_mine_page_shows_expired_not_still_waiting_once_window_passes`. Ran
+  both against the pre-fix code first (temporarily stashing just
+  `app/web.py`/`mine.html`) to confirm they actually fail there -- they
+  did, on the exact "Waiting for a match" text the fix removes -- not just
+  that they pass now. Full suite: 153 tests, up from 151, all green.
+
 ### 31. Stop on_new_request() from reverting a cancel of the *incoming* request itself, mid-scoring
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

@@ -133,6 +133,17 @@ def my_request_status(request_id: UUID, request: Request):
     reload. If the request is already matched by the time this page loads
     (e.g. a reload after the fact), render the reveal server-side instead
     of making the rider wait on a WebSocket event that already happened.
+
+    A request that's no longer OPEN but also never matched -- cancelled
+    (TASKS.md #15) or expired (TASKS.md #14) -- used to render exactly the
+    same "Waiting for a match... this page updates itself" message as a
+    genuinely still-open one, which is actively wrong for a cancel: the
+    poster who just cancelled their own request, via the API, would reload
+    this page and be told it's still waiting, and the page would open a
+    WebSocket that can never receive a match for it. `status` (the same
+    computed value GET /requests already reports via to_public(), so
+    "expired" here means the same thing it means there) lets the template
+    tell the two states apart.
     """
     store = request.app.state.store
     mine = store.get(request_id)
@@ -148,5 +159,5 @@ def my_request_status(request_id: UUID, request: Request):
     return templates.TemplateResponse(
         request,
         "mine.html",
-        {"request_id": request_id, "reveal": reveal},
+        {"request_id": request_id, "reveal": reveal, "status": to_public(mine).status.value},
     )
