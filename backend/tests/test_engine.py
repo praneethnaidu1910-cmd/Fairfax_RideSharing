@@ -121,6 +121,75 @@ def test_match_batch_excludes_opposite_direction_pair():
     assert request_b.status == RequestStatus.OPEN
 
 
+def test_match_batch_excludes_pair_with_no_window_overlap():
+    # Same corridor, same direction, close origins -- spatial and
+    # directional scores both look great -- but the two departure windows
+    # are 13 hours apart on the same day, with zero overlap. Confirmed this
+    # was real, not theoretical, before adding MIN_TEMPORAL_SCORE:
+    # WEIGHT_SPATIAL + WEIGHT_DIRECTIONAL (0.75) alone was enough to win a
+    # greedy match slot even with temporal_score() == 0.0, and the match's
+    # own `reason` string literally read "0min window overlap" -- the same
+    # kind of false positive MIN_DIRECTIONAL_SCORE already exists to catch
+    # for direction, just never closed for time.
+    point_p = Location(lat=38.8462, lng=-77.3064)
+    point_q = Location(lat=38.8500, lng=-77.3100)
+    destination = Location(lat=38.9757, lng=-77.6122)
+    morning = OneOffSchedule(
+        earliest_departure=datetime(2026, 12, 1, 7, 0),
+        latest_departure=datetime(2026, 12, 1, 7, 30),
+    )
+    evening = OneOffSchedule(
+        earliest_departure=datetime(2026, 12, 1, 20, 0),
+        latest_departure=datetime(2026, 12, 1, 20, 30),
+    )
+
+    request_a = RideRequest(
+        rider_id="a", origin=point_p, destination=destination, schedule=morning, contact="555-0310"
+    )
+    request_b = RideRequest(
+        rider_id="b", origin=point_q, destination=destination, schedule=evening, contact="555-0311"
+    )
+
+    matches = MatchingEngine().match_batch([request_a, request_b])
+
+    assert matches == []
+    assert request_a.status == RequestStatus.OPEN
+    assert request_b.status == RequestStatus.OPEN
+
+
+def test_on_new_request_does_not_match_a_candidate_with_no_window_overlap():
+    # Incremental counterpart of the match_batch test above -- same
+    # disjoint-window fixture, arriving one at a time the way real traffic
+    # does, through on_new_request() instead of a single match_batch() call.
+    engine = MatchingEngine()
+    point_p = Location(lat=38.8462, lng=-77.3064)
+    point_q = Location(lat=38.8500, lng=-77.3100)
+    destination = Location(lat=38.9757, lng=-77.6122)
+    morning = OneOffSchedule(
+        earliest_departure=datetime(2026, 12, 1, 7, 0),
+        latest_departure=datetime(2026, 12, 1, 7, 30),
+    )
+    evening = OneOffSchedule(
+        earliest_departure=datetime(2026, 12, 1, 20, 0),
+        latest_departure=datetime(2026, 12, 1, 20, 30),
+    )
+    request_a = RideRequest(
+        rider_id="a", origin=point_p, destination=destination, schedule=morning, contact="555-0312"
+    )
+    request_b = RideRequest(
+        rider_id="b", origin=point_q, destination=destination, schedule=evening, contact="555-0313"
+    )
+
+    first_matches = engine.on_new_request(request_a)
+    second_matches = engine.on_new_request(request_b)
+
+    assert first_matches == []
+    assert second_matches == []
+    assert request_a.status == RequestStatus.OPEN
+    assert request_b.status == RequestStatus.OPEN
+    assert request_b in engine._unmatched
+
+
 def test_match_batch_skips_an_expired_open_request():
     # rider-1/rider-7 are the known-good pair (test_match_batch_matches_
     # close_same_direction_pair above); backdating rider-1's window into

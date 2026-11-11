@@ -61,6 +61,67 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 33. Add a hard cutoff so a pair with zero departure-window overlap can't match on spatial/directional fit alone
+- Not a numbered "Up next" item -- same as the last many entries here,
+  "Up next" only has tasks 13/19 on it and both are manual-only, so this
+  evening run went looking for a real bug instead of stopping, and found
+  one in `app/matching/engine.py` right next to the directional cutoff
+  task 4 added back when this engine was first built.
+- `match_batch()`/`on_new_request()` already have a hard cutoff on
+  `directional_score` (`MIN_DIRECTIONAL_SCORE`, task 4's own note: "the
+  weighted `compatibility_score` alone wasn't enough to reject a same-cell,
+  opposite-direction pair") and a hard constraint on `capacity_fits()` --
+  but nothing analogous existed for `temporal_score`, even though
+  docs/MATCHING_ALGORITHM.md names time overlap as one of the same three
+  real matching dimensions (space, direction, time) spatial/directional
+  already get hard cutoffs for. Confirmed this was real, not theoretical,
+  with a live script before writing any fix: two one-off riders, same
+  corridor, close origins, departing **13 hours apart on the same day**
+  (7am and 8pm) -- `temporal_score()` correctly computed `0.0` for that
+  pair, but `compatibility_score()`'s `WEIGHT_SPATIAL + WEIGHT_DIRECTIONAL`
+  (0.75 combined) was enough on its own to win a greedy match slot anyway.
+  The resulting `MatchGroup.reason` (task 20's own explain_match() output)
+  literally read `"...0min window overlap, capacity fits"` -- the engine
+  was matching two riders it could plainly see don't overlap in time at
+  all, the exact "perfect spatial/temporal... could otherwise outweigh"
+  failure mode task 4's own note already describes for direction, just
+  never closed for time.
+- Fix: new `MIN_TEMPORAL_SCORE = 0.0` hard cutoff, same pattern as
+  `MIN_DIRECTIONAL_SCORE` -- a window pair now has to clear
+  `temporal_score(window_a, window_b) > MIN_TEMPORAL_SCORE` (i.e. the two
+  windows have to actually overlap at all) before `compatibility_score()`
+  ever gets computed for it, in both `match_batch()`'s per-pair window loop
+  and `on_new_request()`'s. Deliberately the narrowest version of this fix
+  -- requiring *some* real overlap, not picking an arbitrary minimum
+  fraction of overlap, since the weighted sum already handles "how good is
+  a small-but-real overlap" on its own; only the "literally zero overlap"
+  case needed a hard floor, the same way only "literally opposite
+  direction" needed one for bearing.
+- Separate, bigger gap I found right next to this one but am **not**
+  fixing here, flagging instead since it's a real design question, not a
+  pure bug: `expand_schedule()` always expands a `RecurringSchedule` to
+  "the Monday-Sunday week containing `date.today()`" with no way to target
+  a different week. That means a recurring Monday rider can only ever be
+  scored against *this calendar week's* Monday occurrence -- so a one-off
+  request dated any week other than the current one (e.g. "next Monday," 7
+  days out) gets compared against a recurring rider's stale/already-passed
+  occurrence from this week instead of the actual future date they'd really
+  share, scoring `0min window overlap` and (correctly, now) never matching,
+  even though the two riders really would be compatible on the date that
+  actually matters. Fixing this needs a real decision -- e.g. should
+  `on_new_request()`/`match_batch()` expand a recurring schedule across
+  several weeks ahead, or key off the *incoming* one-off request's own
+  date instead of `date.today()` -- not something to guess at while also
+  touching the exact-zero-overlap fix above in the same pass.
+- Tests: `tests/test_engine.py` adds
+  `test_match_batch_excludes_pair_with_no_window_overlap` and
+  `test_on_new_request_does_not_match_a_candidate_with_no_window_overlap`,
+  both using the same 13-hours-apart-same-day fixture the manual script
+  above used. Ran both against the pre-fix code first to confirm they
+  actually fail there (a real `MatchGroup` comes back instead of `[]`) --
+  they did, on both tests -- not just that they pass now. Full suite: 155
+  tests, up from 153, all green.
+
 ### 32. Stop `/mine/{id}` from telling a cancelled/expired poster their request is still "waiting for a match"
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

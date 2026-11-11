@@ -26,6 +26,7 @@ from app.matching.scoring import (
     expand_schedule,
     explain_match,
     is_expired,
+    temporal_score,
 )
 from app.schemas import MatchGroup, OneOffSchedule, RequestStatus, RideRequest
 
@@ -49,6 +50,17 @@ DEFAULT_VEHICLE_CAPACITY = 4
 # a hard cutoff alongside capacity, not folded into the weighted score, so
 # a pair can't buy its way past it with a tight time window.
 MIN_DIRECTIONAL_SCORE = 0.5
+
+# A window pair that doesn't overlap at all (temporal_score == 0 -- see
+# scoring.temporal_score) isn't a real match no matter how good the
+# spatial/directional fit is -- two riders leaving 13 hours apart on the
+# same corridor were still getting matched before this cutoff existed,
+# since WEIGHT_SPATIAL + WEIGHT_DIRECTIONAL (0.75) alone was enough to
+# clear a greedy "best available" slot with zero time compatibility.
+# Same hard-cutoff pattern as MIN_DIRECTIONAL_SCORE just above -- the
+# weighted compatibility_score wasn't enough to reject this on its own,
+# the same way it wasn't enough to reject an opposite-direction pair.
+MIN_TEMPORAL_SCORE = 0.0
 
 
 class MatchingEngine:
@@ -117,9 +129,16 @@ class MatchingEngine:
                 best_score, best_window_a, best_window_b = None, None, None
                 for window_a in windows_a:
                     for window_b in windows_b:
+                        # A window pair with no actual overlap isn't a real
+                        # match candidate at all (MIN_TEMPORAL_SCORE above),
+                        # regardless of how good the rest of the score is.
+                        if temporal_score(window_a, window_b) <= MIN_TEMPORAL_SCORE:
+                            continue
                         score = compatibility_score(request, candidate, window_a, window_b)
                         if best_score is None or score > best_score:
                             best_score, best_window_a, best_window_b = score, window_a, window_b
+                if best_score is None:
+                    continue
                 scored_pairs.append(
                     (best_score, request.id, candidate.id, best_window_a, best_window_b)
                 )
@@ -195,6 +214,10 @@ class MatchingEngine:
             windows_existing = expand_schedule(candidate.schedule)
             for window_a in windows_new:
                 for window_b in windows_existing:
+                    # Same hard cutoff as match_batch() above -- a window
+                    # pair with no actual overlap isn't a real candidate.
+                    if temporal_score(window_a, window_b) <= MIN_TEMPORAL_SCORE:
+                        continue
                     score = compatibility_score(request, candidate, window_a, window_b)
                     if best_score is None or score > best_score:
                         best_score, best_candidate = score, candidate
