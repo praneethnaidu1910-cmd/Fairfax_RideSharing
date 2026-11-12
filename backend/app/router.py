@@ -91,14 +91,30 @@ def cancel_request(request_id: UUID, request: Request) -> RideRequestPublic:
     already-CANCELLED one has nothing left to do. All three 409 rather
     than silently no-op, so a caller can tell a real cancel happened from
     one that didn't.
+
+    Checks the same *computed* status to_public() reports (via
+    to_public(target).status), not the raw stored value -- an EXPIRED
+    one-off request's stored status never actually becomes "expired"
+    (TASKS.md #14: that's a read-time computation, nothing ever writes it
+    back), so comparing against the raw stored status let a caller cancel
+    an already-expired request and get a 200 instead of the 409 this
+    docstring has always described. That wasn't just a status-code mismatch:
+    it flipped status_changed_at to "now," which is also what
+    app/retention.py's terminal_at() reads to decide when a request became
+    retention-eligible -- so "cancelling" an already-expired request reset
+    its 30-day anonymization clock to start over from the cancel instead of
+    from the window's own latest_departure, needlessly extending how long
+    its precise location/contact sat around unredacted.
     """
     store = request.app.state.store
     target = store.get(request_id)
     if target is None:
         raise HTTPException(status_code=404, detail="request not found")
-    if target.status != RequestStatus.OPEN:
+    effective_status = to_public(target).status
+    if effective_status != RequestStatus.OPEN:
         raise HTTPException(
-            status_code=409, detail=f"cannot cancel a request with status '{target.status.value}'"
+            status_code=409,
+            detail=f"cannot cancel a request with status '{effective_status.value}'",
         )
 
     target.status = RequestStatus.CANCELLED

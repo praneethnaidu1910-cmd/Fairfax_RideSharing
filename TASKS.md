@@ -61,6 +61,60 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 35. Stop cancel from silently succeeding (and resetting the retention clock) on an already-expired request
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug
+  the same way the last several runs did, and found one in `cancel_request()`
+  that's been sitting right next to its own docstring this whole time.
+- `cancel_request()`'s docstring has said since task 15 that "a MATCHED
+  request... an EXPIRED one... and a second cancel on an already-CANCELLED
+  one" should all 409, but the actual check was
+  `target.status != RequestStatus.OPEN` -- the *raw stored* status. Task
+  14's whole point is that an expired one-off request's stored status
+  never actually becomes `expired`; that's a read-time computation
+  (`to_public()`/`is_expired()`) that nothing ever writes back, so the
+  stored value stays `open` forever. That meant the EXPIRED case in the
+  docstring was never real: cancelling a request GET already reports as
+  `expired` sailed through with a `200` and flipped it to `cancelled`
+  instead of 409ing. Confirmed this was real, not theoretical, with a live
+  `TestClient` before writing any fix: posted a one-off request with a
+  departure window 2 hours in the past (so `GET` already reports
+  `"status": "expired"`), then called the real cancel endpoint against it
+  -- got back a `200` and `"status": "cancelled"`, not the `409` its own
+  docstring describes.
+- Worse than just a wrong status code: `cancel_request()` stamps
+  `status_changed_at = datetime.utcnow()` on every successful cancel, and
+  `app/retention.py`'s `terminal_at()` reads that same field to decide when
+  a *cancelled* request became retention-eligible -- but for an
+  already-expired request, the *correct* terminal moment is the window's
+  own `latest_departure` (expired, not cancelled, is what actually
+  happened to it; see `terminal_at()`'s own `OPEN`+`is_expired()` branch).
+  So this bug didn't just mislabel the request -- it silently pushed the
+  30-day anonymization clock (TASKS.md #17) out to "now," needlessly
+  extending how long its precise pickup/dropoff and real contact info sat
+  around in Postgres unredacted, for any id a caller could guess or still
+  had bookmarked after the window passed. No auth gates `POST
+  /requests/{id}/cancel` (SCOPE.md's open-join model), so this wasn't just
+  a self-inflicted footgun for the original poster either.
+- Fix: compare against `to_public(target).status` -- the same *computed*
+  status `GET /requests[/{id}]` already reports, reusing task 32's own
+  pattern of not duplicating `is_expired()` logic a second time -- instead
+  of the raw stored value. An `open`-and-not-expired request is unaffected;
+  `matched`/`cancelled` were already correctly rejected before this fix (their
+  stored and computed status are the same thing) and still are; `expired`
+  now actually 409s like the docstring always said, and the 409 message
+  itself now says `'expired'` instead of the misleading `'open'` it would
+  have said had the raw value been used for the message too.
+- Tests: new
+  `tests/test_requests_api.py::test_cancel_an_expired_request_returns_409`
+  reproduces the exact scenario above (a past-window one-off, `GET`
+  reporting `expired`, then a real cancel call) and asserts `409`, the
+  `'expired'` detail message, and that a follow-up `GET` still reports
+  `expired`, not `cancelled`. Ran it against the pre-fix code first
+  (temporarily stashing just `app/router.py`) to confirm it actually fails
+  there -- a real `200`/`cancelled` came back, not just that it passes now.
+  Full suite: 158 tests, up from 157, all green.
+
 ### 34. Fix bucketing's candidate radius silently undercutting scoring's own 5-mile "close enough to share a pickup" threshold
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

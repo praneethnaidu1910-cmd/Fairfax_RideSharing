@@ -297,3 +297,30 @@ def test_open_request_past_its_window_reports_expired_status():
     assert detail.json()["status"] == "expired"
     entry = {r["id"]: r for r in listing.json()}[created["id"]]
     assert entry["status"] == "expired"
+
+
+def test_cancel_an_expired_request_returns_409():
+    # cancel_request()'s own docstring (TASKS.md #15) always said EXPIRED
+    # should 409 like MATCHED/CANCELLED do -- but it compared against the
+    # raw *stored* status, and TASKS.md #14's whole point is that an
+    # expired one-off request's stored status stays "open" forever (only
+    # to_public() computes "expired" at read time). So this 409 never
+    # actually fired, and a caller got a 200 "cancelling" a request that
+    # was already unmatchable -- which also reset status_changed_at to
+    # now, pushing out app/retention.py's 30-day anonymization clock
+    # instead of leaving it counting from the window's own
+    # latest_departure.
+    payload = _one_off_payload(
+        "rider-cancel-expired", FAIRFAX, ALDIE, -120, 30, contact="555-0505"
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        assert created["status"] == "expired"
+        response = client.post(f"/requests/{created['id']}/cancel")
+        detail = client.get(f"/requests/{created['id']}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "cannot cancel a request with status 'expired'"
+    # Still just "expired", not silently flipped to "cancelled".
+    assert detail.json()["status"] == "expired"
