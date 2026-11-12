@@ -61,6 +61,75 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 34. Fix bucketing's candidate radius silently undercutting scoring's own 5-mile "close enough to share a pickup" threshold
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one in
+  `app/matching/bucketing.py` this time: a mismatch between the candidate-
+  reduction step and the scoring step it's supposed to feed, not a bug in
+  either one taken alone.
+- `scoring.py`'s `MAX_PICKUP_DISTANCE_MILES = 5.0` is the threshold
+  `spatial_score()` actually scores against -- its own comment cites
+  SCOPE.md's own example almost verbatim: "two people 1.2mi apart who'd
+  happily walk to a shared pickup." But `bucketing.py`'s
+  `candidates_for()` runs *before* any scoring happens, and its old
+  `NEIGHBOR_RING = 1` ("same-or-adjacent hex ring") only guarantees real-
+  world coverage of about half a mile at `COARSE_RESOLUTION` (H3
+  resolution 8) -- confirmed by walking every 5-degree bearing out from a
+  Fairfax-area point and binary-searching exactly where ring membership
+  flips. A pair 1.2 miles apart never became a candidate at all, so
+  `spatial_score()`'s 5-mile threshold was silently dead code for most of
+  its own range: `candidates_for()` threw the pair out before scoring ever
+  ran. Confirmed this was real, not theoretical, with a live script before
+  writing any fix: two one-off riders built from SCOPE.md's own example
+  (same destination, same departure window, origin 1.2mi apart --
+  `spatial_score` 0.88, `directional_score` 0.999, a textbook match on
+  every dimension `scoring.py` weighs) fed through the real
+  `on_new_request()` one at a time, and the second arrival came back `[]`
+  -- no match, not pooled against each other at all, with nothing
+  anywhere surfacing that bucketing and scoring disagreed about what
+  "close enough" means by almost an order of magnitude. The existing
+  "1.2mi apart" fixture in `app/sample_data.py` (rider-1/rider-7, already
+  used by several tests) turned out to actually be ~0.33mi apart in real
+  coordinates despite its own comment's claim -- comfortably inside the
+  old too-narrow ring, which is exactly why no existing test ever caught
+  this: the fixture's comment described the boundary case it meant to
+  represent, but the actual numbers never exercised it. Left that fixture
+  alone rather than widening it to a real 1.2mi, since its coordinates are
+  shared by several other test files beyond this task's scope
+  (`test_live_matches.py`, `test_requests_api.py`,
+  `app/dispatch/sample_drivers.py` all reuse the same point) and changing
+  it isn't needed to close this gap -- new fixtures below do that instead.
+- Fix: `NEIGHBOR_RING` is now `12`, the smallest ring confirmed (same
+  bearing-walk method as the reproduction above) to guarantee real-world
+  coverage of `MAX_PICKUP_DISTANCE_MILES` in every direction at
+  `COARSE_RESOLUTION`, with a little margin to spare (worst-case ~5.66mi
+  covered against the 5.0mi requirement) -- a k-ring isn't a circle, so
+  the hex grid's worst-case direction covers meaningfully less real-world
+  distance per k than its best-case direction, ruling out a simple
+  "distance / edge length" formula. Ties the two constants together by
+  comment and by a dedicated coverage test (below) rather than leaving
+  them independently hand-tuned and silently driftable the way they
+  already had drifted once.
+- Tests: `tests/test_bucketing.py` adds
+  `test_bucketing_includes_scopes_own_1_2_mile_shared_pickup_example`
+  (builds the exact 1.2mi reproduction above and asserts
+  `candidate_groups()` now includes each rider in the other's candidate
+  set) and
+  `test_neighbor_ring_covers_max_pickup_distance_in_every_direction` (the
+  general guarantee -- walks a point exactly `MAX_PICKUP_DISTANCE_MILES`
+  away at every 15-degree bearing from a Fairfax-area origin and asserts
+  it's still inside the `NEIGHBOR_RING`-ring, so a future change to
+  `NEIGHBOR_RING`, `MAX_PICKUP_DISTANCE_MILES`, or `COARSE_RESOLUTION`
+  that breaks this relationship again gets caught here instead of
+  silently reintroducing the same gap). Ran both against the pre-fix
+  `NEIGHBOR_RING = 1` first to confirm they actually fail there -- they
+  did, on both tests -- not just that they pass now. Also reran the full
+  suite afterward to confirm the wider ring doesn't change any existing
+  test's outcome (it doesn't -- the sample dataset's other "far apart"
+  negative fixtures are all well beyond the new ring's ~5.6mi reach too).
+  Full suite: 157 tests, up from 155, all green.
+
 ### 33. Add a hard cutoff so a pair with zero departure-window overlap can't match on spatial/directional fit alone
 - Not a numbered "Up next" item -- same as the last many entries here,
   "Up next" only has tasks 13/19 on it and both are manual-only, so this
