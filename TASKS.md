@@ -61,6 +61,63 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 36. Fix temporal_score() scoring a precise departure instant as zero overlap with a window that contains it
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug
+  the same way the last several runs did, and found one in
+  `app/matching/scoring.py`'s `temporal_score()` -- the exact function
+  task 33 already added a hard cutoff around, just a different edge in the
+  same formula.
+- `OneOffSchedule`'s own validator only requires `latest_departure >=
+  earliest_departure`, so `latest_departure == earliest_departure` -- a
+  precise single-instant "window," not a range -- is a real, reachable
+  input: nothing in `/new`'s two separate datetime-local fields or in
+  `RideRequestCreate` stops a rider from typing the same value into both
+  (plausible for anyone who thinks of their trip as "leaving at exactly
+  9am," not as a flexible window, same instinct SCOPE.md's own real
+  message samples show -- "leaving IAD 9ish"). Confirmed this was real,
+  not theoretical, with a live script before writing any fix: a precise
+  2pm request and a 1:45-2:15pm request, identical origin/destination,
+  scored `temporal_score() == 0.0` -- the exact same number two requests
+  13 hours apart would score -- because `overlap_seconds` collapses to
+  exactly 0 whenever either window has zero width, regardless of whether
+  that instant falls squarely inside the other window or nowhere near it.
+  Fed through the real engine, `on_new_request()` never matched the two
+  arrivals (`MIN_TEMPORAL_SCORE`'s hard cutoff, task 33, correctly rejects
+  anything scoring `<= 0.0` -- it just had no way to tell "truly disjoint"
+  apart from "one side is a single instant the other side's window already
+  covers"), and both sat in the pool forever with nothing anywhere
+  surfacing that the engine was treating a perfect time match as if it
+  were the worst possible one.
+- Fix: `temporal_score()` now only treats a *strictly negative*
+  `overlap_seconds` as "no overlap at all" (genuinely disjoint windows,
+  same as before). An exact zero with at least one zero-width window means
+  that window's one and only acceptable instant is covered by the overlap
+  -- the best possible temporal fit for it, not the worst -- so that case
+  now scores `1.0` instead of falling through to a `0 / shortest_window`
+  division. This is the formula's own natural limit as a window's width
+  shrinks toward zero while staying fully contained in the other's range,
+  not a new, separately-invented number. Deliberately narrow: two normal,
+  positive-width windows that merely touch at a shared boundary instant
+  (not one side being zero-width) still score 0, exactly as before --
+  that's a different case this fix doesn't touch, since nothing forces a
+  non-arbitrary answer for it the way the zero-width case's own containment
+  does.
+- Tests: `tests/test_scoring.py` adds
+  `test_temporal_score_precise_instant_contained_in_a_window_is_a_perfect_match`
+  (a precise instant inside a real window scores `1.0`, two identical
+  precise instants score `1.0`, a precise instant outside a window still
+  scores `0.0`) and
+  `test_temporal_score_two_normal_windows_merely_touching_still_scores_zero`
+  (the narrower boundary-touch case this fix leaves alone).
+  `tests/test_engine.py` adds
+  `test_on_new_request_matches_a_precise_departure_time_inside_the_others_window`,
+  the real-engine reproduction above -- two arrivals, same route, one
+  precise and one flexible, now actually match. Ran both new scoring
+  assertions and the engine test against the pre-fix code first to confirm
+  they actually fail there (`0.0`/no match, not `1.0`/matched), not just
+  that they pass now. Full suite: 161 tests, up from 158, all green.
+
 ### 35. Stop cancel from silently succeeding (and resetting the retention clock) on an already-expired request
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug

@@ -121,6 +121,50 @@ def test_match_batch_excludes_opposite_direction_pair():
     assert request_b.status == RequestStatus.OPEN
 
 
+def test_on_new_request_matches_a_precise_departure_time_inside_the_others_window():
+    # scoring.temporal_score()'s own fix: a rider who posts a precise
+    # departure "window" (latest == earliest -- OneOffSchedule's validator
+    # allows this, e.g. typing the same value into both fields instead of
+    # giving themselves flexibility) used to be unmatchable with *anyone*,
+    # even an identical-route rider whose real window fully contains that
+    # exact instant, because the old overlap math scored that pair's
+    # temporal fit as 0.0 -- indistinguishable from two riders hours apart
+    # -- and MIN_TEMPORAL_SCORE's hard cutoff then rejected it outright.
+    # Confirmed this was real against the live engine before the fix: two
+    # arrivals, same origin/destination, came back unmatched, both sitting
+    # in the pool forever.
+    point = Location(lat=38.8462, lng=-77.3064)
+    destination = Location(lat=38.9757, lng=-77.6122)
+    now = datetime.utcnow() + timedelta(hours=2)
+
+    precise_rider = RideRequest(
+        rider_id="precise",
+        origin=point,
+        destination=destination,
+        schedule=OneOffSchedule(earliest_departure=now, latest_departure=now),
+        contact="555-0320",
+    )
+    flexible_rider = RideRequest(
+        rider_id="flexible",
+        origin=point,
+        destination=destination,
+        schedule=OneOffSchedule(
+            earliest_departure=now - timedelta(minutes=15),
+            latest_departure=now + timedelta(minutes=15),
+        ),
+        contact="555-0321",
+    )
+
+    engine = MatchingEngine()
+    assert engine.on_new_request(precise_rider) == []
+    matches = engine.on_new_request(flexible_rider)
+
+    assert len(matches) == 1
+    assert set(matches[0].request_ids) == {precise_rider.id, flexible_rider.id}
+    assert precise_rider.status == RequestStatus.MATCHED
+    assert flexible_rider.status == RequestStatus.MATCHED
+
+
 def test_match_batch_excludes_pair_with_no_window_overlap():
     # Same corridor, same direction, close origins -- spatial and
     # directional scores both look great -- but the two departure windows

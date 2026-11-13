@@ -59,15 +59,39 @@ def directional_score(a: RideRequest, b: RideRequest) -> float:
 
 def temporal_score(a: OneOffSchedule, b: OneOffSchedule) -> float:
     """Overlap of two one-off departure windows, normalized by the shorter
-    window's duration, 0..1. Zero for disjoint windows."""
+    window's duration, 0..1. Zero for disjoint windows.
+
+    `OneOffSchedule`'s own validator allows `latest_departure ==
+    earliest_departure` -- a precise single-instant "window," not a range
+    (e.g. a rider who types the same value into both fields instead of
+    giving themselves any flexibility). That's a real, reachable input, not
+    just a theoretical one: nothing in the intake form or schema stops it.
+    Before this fix, `overlap_seconds <= 0` treated that degenerate case
+    exactly like "no overlap at all" even when the instant fell squarely
+    inside the other window -- confirmed live: a precise 2pm request and a
+    1:45-2:15pm request for the identical trip scored 0.0 overlap, same as
+    two requests 13 hours apart, and could never match each other no matter
+    how perfect every other dimension was. The fix: only a strictly
+    negative `overlap_seconds` means the windows are genuinely disjoint; an
+    exact zero with at least one zero-width window means that window's one
+    and only acceptable instant is covered by the overlap, which is the
+    best possible temporal fit for it, not the worst -- the natural limit
+    of this same formula as a window's own width shrinks toward zero while
+    staying fully contained in the other's range. A zero-width overlap
+    between two windows that both have real width (e.g. two windows that
+    merely touch at a shared boundary instant) is left scoring 0, same as
+    before -- that's a different, narrower case this fix doesn't touch.
+    """
     overlap_start = max(a.earliest_departure, b.earliest_departure)
     overlap_end = min(a.latest_departure, b.latest_departure)
     overlap_seconds = (overlap_end - overlap_start).total_seconds()
-    if overlap_seconds <= 0:
+    if overlap_seconds < 0:
         return 0.0
     duration_a = (a.latest_departure - a.earliest_departure).total_seconds()
     duration_b = (b.latest_departure - b.earliest_departure).total_seconds()
-    shortest_window = max(min(duration_a, duration_b), 1.0)
+    shortest_window = min(duration_a, duration_b)
+    if shortest_window <= 0:
+        return 1.0
     return min(1.0, overlap_seconds / shortest_window)
 
 

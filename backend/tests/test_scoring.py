@@ -50,6 +50,46 @@ def test_temporal_score_overlapping_windows_score_higher_than_disjoint():
     assert temporal_score(window_a, disjoint) == 0
 
 
+def test_temporal_score_precise_instant_contained_in_a_window_is_a_perfect_match():
+    # A precise departure "window" that's really a single instant (latest
+    # == earliest -- OneOffSchedule's own validator allows this, e.g. a
+    # rider who typed the same value into both fields instead of giving
+    # themselves flexibility) falling inside another rider's real window
+    # used to score 0.0 overlap here -- the exact same number as two
+    # requests hours apart -- because overlap_seconds collapses to 0
+    # whenever one side has zero width, regardless of where that instant
+    # falls. That's the worst possible score for what's actually the best
+    # possible temporal fit: every acceptable moment the precise side has
+    # (there's only one) is covered by the other's window.
+    now = datetime.utcnow()
+    precise_instant = OneOffSchedule(earliest_departure=now, latest_departure=now)
+    containing_window = OneOffSchedule(
+        earliest_departure=now - timedelta(minutes=15),
+        latest_departure=now + timedelta(minutes=15),
+    )
+    outside_window = OneOffSchedule(
+        earliest_departure=now + timedelta(hours=5),
+        latest_departure=now + timedelta(hours=5, minutes=30),
+    )
+    assert temporal_score(precise_instant, containing_window) == 1.0
+    assert temporal_score(precise_instant, precise_instant) == 1.0
+    assert temporal_score(precise_instant, outside_window) == 0.0
+
+
+def test_temporal_score_two_normal_windows_merely_touching_still_scores_zero():
+    # A different, narrower case this fix deliberately leaves alone: two
+    # windows that both have real width and only share a single boundary
+    # instant (not one side being a precise, zero-width "window") still
+    # scores 0 overlap, same as before this fix.
+    now = datetime.utcnow()
+    window_a = OneOffSchedule(earliest_departure=now, latest_departure=now + timedelta(minutes=30))
+    touching = OneOffSchedule(
+        earliest_departure=now + timedelta(minutes=30),
+        latest_departure=now + timedelta(minutes=60),
+    )
+    assert temporal_score(window_a, touching) == 0.0
+
+
 def test_capacity_fits_hard_constraint():
     assert capacity_fits(RIDER_1, RIDER_7, vehicle_capacity=4)  # 1 + 1 seats
     assert not capacity_fits(RIDER_1, RIDER_7, vehicle_capacity=1)
