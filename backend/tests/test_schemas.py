@@ -60,6 +60,46 @@ def test_one_off_schedule_rejects_inverted_window():
         )
 
 
+def test_one_off_schedule_rejects_timezone_aware_datetimes():
+    # Pydantic parses an ISO 8601 string with an offset ("-05:00") or a "Z"
+    # suffix into a tz-aware datetime, but every other datetime in this
+    # codebase (datetime.utcnow() in scoring.is_expired(), the
+    # DateTime(timezone=False) columns app/models.py persists to) is
+    # naive. Confirmed real, not theoretical, before this fix: POST
+    # /requests with a tz-aware earliest_departure 500'd with a bare
+    # TypeError ("can't compare offset-naive and offset-aware datetimes")
+    # the moment _check_window compared it against the also-tz-aware
+    # latest_departure, and an already-posted one with only one field
+    # tz-aware 500'd the same way the first time is_expired() ran. This
+    # should 422 here instead, at the one place client input enters this
+    # shape, the same way Location already rejects an out-of-range
+    # lat/lng rather than letting bad input reach the matching engine.
+    with pytest.raises(ValidationError):
+        OneOffSchedule(
+            earliest_departure="2026-01-01T14:00:00-05:00",
+            latest_departure="2026-01-01T14:30:00-05:00",
+        )
+    with pytest.raises(ValidationError):
+        OneOffSchedule(
+            earliest_departure="2026-01-01T14:00:00Z",
+            latest_departure="2026-01-01T14:30:00",
+        )
+
+
+def test_recurring_schedule_rejects_timezone_aware_times():
+    # Same gap as OneOffSchedule above, on a bare `time` instead of a
+    # `datetime` -- "09:00:00-05:00" parses to a tz-aware time, and
+    # comparing it against the naive latest_departure_time below used to
+    # 500 with the same kind of uncaught TypeError rather than a clean
+    # validation error.
+    with pytest.raises(ValidationError):
+        RecurringSchedule(
+            weekdays=[0, 1],
+            earliest_departure_time="09:00:00-05:00",
+            latest_departure_time=time(9, 30),
+        )
+
+
 def test_recurring_schedule_rejects_invalid_weekday():
     with pytest.raises(ValidationError):
         RecurringSchedule(

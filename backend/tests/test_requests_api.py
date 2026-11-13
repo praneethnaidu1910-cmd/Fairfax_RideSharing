@@ -64,6 +64,38 @@ def test_create_request_rejects_impossible_coordinates():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_timezone_aware_departure_times():
+    # app/schemas.py's OneOffSchedule now rejects a tz-aware
+    # earliest_departure/latest_departure -- before this, a perfectly
+    # normal thing for a non-browser API client to send (an ISO 8601
+    # string with a "-05:00" offset or a "Z" suffix, unlike the naive
+    # strings every other test here posts) 500'd instead of 422ing: the
+    # comparison in OneOffSchedule's own "latest must not be before
+    # earliest" check raised a bare TypeError ("can't compare
+    # offset-naive and offset-aware datetimes"), since every other
+    # datetime in this codebase (scoring.is_expired()'s
+    # datetime.utcnow(), the DateTime(timezone=False) columns requests
+    # get persisted to) is naive.
+    earliest = datetime.utcnow() + timedelta(hours=2)
+    latest = earliest + timedelta(minutes=30)
+    payload = {
+        "rider_id": "rider-tz-aware",
+        "origin": {"lat": FAIRFAX[0], "lng": FAIRFAX[1]},
+        "destination": {"lat": ALDIE[0], "lng": ALDIE[1]},
+        "schedule": {
+            "earliest_departure": earliest.isoformat() + "-05:00",
+            "latest_departure": latest.isoformat() + "-05:00",
+        },
+        "seats_needed": 1,
+        "contact": "555-0601",
+    }
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_create_request_rejects_empty_contact():
     # app/schemas.py's RideRequestCreate now requires a non-empty contact
     # -- before this, an empty string was accepted (201), stored, and

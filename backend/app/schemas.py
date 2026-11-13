@@ -53,6 +53,27 @@ class OneOffSchedule(BaseModel):
 
     @model_validator(mode="after")
     def _check_window(self) -> "OneOffSchedule":
+        # Pydantic happily parses a timezone-aware ISO 8601 string (e.g. a
+        # "Z" suffix, or "-05:00") into an aware datetime here -- but every
+        # other datetime in this codebase (datetime.utcnow() in
+        # scoring.is_expired()/RideRequest.posted_at/status_changed_at, the
+        # DateTime(timezone=False) columns in app/models.py) is naive.
+        # Comparing a naive and an aware datetime doesn't raise a clean
+        # ValueError Pydantic can turn into a 422 -- it's a bare TypeError,
+        # so it crashes straight through model validation (here, comparing
+        # the two fields against each other) and, for a request that
+        # passes this check, straight through is_expired() the first time
+        # anything reads the request back. Confirmed real, not
+        # theoretical: POST /requests with
+        # earliest_departure="2026-01-01T14:00:00-05:00" -- a perfectly
+        # normal thing for a non-browser API client to send -- 500s
+        # instead of posting or 422ing. Rejecting it here, before the
+        # comparison that would otherwise crash, turns that into a clean
+        # 422 at the one place client input enters this shape.
+        if self.earliest_departure.tzinfo is not None or self.latest_departure.tzinfo is not None:
+            raise ValueError(
+                "earliest_departure/latest_departure must not include timezone info"
+            )
         if self.latest_departure < self.earliest_departure:
             raise ValueError("latest_departure must not be before earliest_departure")
         return self
@@ -70,6 +91,19 @@ class RecurringSchedule(BaseModel):
             raise ValueError("recurring schedule needs at least one weekday")
         if any(day < 0 or day > 6 for day in self.weekdays):
             raise ValueError("weekdays must be 0 (Monday) through 6 (Sunday)")
+        # Same gap as OneOffSchedule._check_window above, just on a bare
+        # `time` instead of a `datetime` -- "09:00:00-05:00" parses to a
+        # tz-aware time, and comparing it against a naive one below is the
+        # same uncaught TypeError (confirmed live: a recurring schedule
+        # with one tz-aware and one naive departure time 500s here, not a
+        # 422), not a clean validation error.
+        if (
+            self.earliest_departure_time.tzinfo is not None
+            or self.latest_departure_time.tzinfo is not None
+        ):
+            raise ValueError(
+                "earliest_departure_time/latest_departure_time must not include timezone info"
+            )
         if self.latest_departure_time < self.earliest_departure_time:
             raise ValueError(
                 "latest_departure_time must not be before earliest_departure_time"

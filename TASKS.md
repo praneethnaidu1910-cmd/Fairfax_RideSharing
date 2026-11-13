@@ -61,6 +61,58 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 37. Reject a timezone-aware departure datetime/time instead of 500ing on it
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug
+  the same way the last several runs did, and found one in
+  `app/schemas.py` this time: a gap between what Pydantic will happily
+  parse and what the rest of this codebase actually assumes about every
+  datetime it touches.
+- Every datetime this app generates itself is naive: `datetime.utcnow()`
+  (`scoring.is_expired()`, `RideRequest.posted_at`/`status_changed_at`
+  defaults), and the `DateTime(timezone=False)` columns `app/models.py`
+  persists to. But `OneOffSchedule.earliest_departure`/`latest_departure`
+  and `RecurringSchedule`'s bare `earliest_departure_time`/
+  `latest_departure_time` are client input, and Pydantic parses a
+  perfectly normal-looking ISO 8601 string with an offset ("2026-01-01T14
+  :00:00-05:00") or a "Z" suffix into a *timezone-aware* value without
+  complaint. Comparing a naive and an aware datetime (or `time`) doesn't
+  raise a clean `ValueError` Pydantic can turn into a 422 -- it's a bare
+  `TypeError`, so it crashes straight through. Confirmed this was real,
+  not theoretical, with a live `TestClient` before writing any fix: `POST
+  /requests` with a tz-aware `earliest_departure` 500'd inside
+  `OneOffSchedule`'s own "latest must not be before earliest" check (both
+  fields tz-aware, so the comparison itself raised); a recurring schedule
+  with *one* field tz-aware and the other naive 500'd the same way one
+  level down, in `RecurringSchedule`'s own window check. Nothing about
+  this needs a browser -- the web form's `datetime-local`/`time` inputs
+  never carry a timezone, but nothing stops a non-browser API client (a
+  future mobile client, or just a well-meaning `curl` with `date
+  --iso-8601=seconds`, which includes an offset by default) from sending
+  one, and SCOPE.md never says this API is browser-only.
+- Fix: both schedules' existing `@model_validator(mode="after")` checks
+  now reject a tz-aware value for any of their datetime/time fields
+  *before* comparing them against each other, with a clear `ValueError`
+  (a clean 422) instead of letting the comparison itself raise. Same
+  "reject bad client input at the one place it enters this shape" pattern
+  as `Location`'s lat/lng range check and `NonBlankStr` -- not trying to
+  guess the client's intended timezone and silently reinterpret it as
+  naive UTC, which would be a real product decision (what timezone does a
+  naive datetime even mean in this app?) this fix doesn't need to make to
+  just stop the crash.
+- Tests: `tests/test_schemas.py` adds
+  `test_one_off_schedule_rejects_timezone_aware_datetimes` (both fields
+  tz-aware, and the "Z"-suffix spelling) and
+  `test_recurring_schedule_rejects_timezone_aware_times` (one field
+  tz-aware, one naive -- the exact mismatch that crashed one level deeper
+  than the all-aware case). `tests/test_requests_api.py` adds the
+  HTTP-level reproduction, `test_create_request_rejects_timezone_aware_departure_times`
+  -- the exact tz-aware `POST /requests` payload above now `422`s. Ran all
+  three against the pre-fix code first (temporarily stashing just
+  `app/schemas.py`) to confirm they actually fail there -- a real `500`
+  and two uncaught `TypeError`s, not just that they pass now. Full suite:
+  164 tests, up from 161, all green.
+
 ### 36. Fix temporal_score() scoring a precise departure instant as zero overlap with a window that contains it
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug
