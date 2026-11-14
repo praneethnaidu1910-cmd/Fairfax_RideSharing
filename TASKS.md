@@ -61,6 +61,52 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 39. Reject a NUL character in rider_id/contact/report-reason instead of 500ing inside the DB driver
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found one right next to the
+  whitespace-only gap task 27 already closed in the same three fields.
+- A NUL byte (`"\u0000"`) is a perfectly ordinary character as far as a JSON
+  string and Pydantic's `str` type are concerned -- it's neither empty nor
+  whitespace, so neither `Field(min_length=1)` nor `_reject_blank` (task 27)
+  catches it. But `rider_id`/`contact`/an abuse report's `reason` all end up
+  in a Postgres text column (`app/store.py`'s `_to_orm()`, `app/reports.py`'s
+  `_to_orm()`), and libpq refuses outright to send a string containing one.
+  Confirmed this was real, not theoretical, with a live `TestClient` call
+  before writing any fix: `POST /requests` with
+  `rider_id="rider-\u0000null"` validated cleanly through
+  `RideRequestCreate` and then raised a bare `ValueError: A string literal
+  cannot contain NUL (0x00) characters` deep inside
+  `RequestStore.add()`'s `session.commit()` -- a real `500`, not a `422`
+  from intake, the exact same "validates fine, crashes three layers down"
+  shape as task 37's timezone-aware-datetime bug, just hitting the DB
+  driver instead of a bare datetime comparison. The same payload on
+  `contact`, and the equivalent on `AbuseReportCreate.reason`
+  (`POST /requests/{id}/report`), crashed the same way.
+- Fix: new `_reject_nul()` validator, chained onto the same `NonBlankStr`
+  `rider_id`/`contact`/`reason` already share (`Annotated[str,
+  Field(min_length=1), AfterValidator(_reject_blank),
+  AfterValidator(_reject_nul)]`) -- rejects any value containing `"\x00"`
+  with a clean `ValueError` a 422 can represent, at the same intake
+  boundary `_reject_blank` already guards, before it ever reaches a
+  session.commit(). No change to `RideRequest`/`AbuseReport` (the
+  internal/stored shapes), same reasoning as task 26/27: those also have to
+  keep representing whatever's already stored, and nothing stored can ever
+  contain a NUL byte now that intake rejects it.
+- Tests: `tests/test_schemas.py` adds
+  `test_ride_request_create_rejects_a_nul_character_in_rider_id_or_contact`
+  (both fields, at the `RideRequestCreate` level). `tests/test_requests_api.py`
+  adds the HTTP-level reproduction,
+  `test_create_request_rejects_a_nul_character_in_rider_id_or_contact` --
+  the exact `rider_id="rider-\x00null"` payload above now `422`s instead of
+  `500`ing. `tests/test_reports.py` adds the same case for
+  `AbuseReportCreate.reason`,
+  `test_post_report_with_a_nul_character_in_reason_is_rejected`. Ran all
+  four against the pre-fix code first (temporarily stashing just
+  `app/schemas.py`) to confirm they actually fail there -- a real `500`
+  with the exact psycopg2 `ValueError` above, not just that they pass now.
+  Full suite: 172 tests, up from 168, all green.
+
 ### 38. Reject a `schedule` that mixes one-off and recurring fields instead of silently picking one
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

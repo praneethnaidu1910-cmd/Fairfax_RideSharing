@@ -170,6 +170,25 @@ def test_create_request_rejects_whitespace_only_rider_id_or_contact():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_a_nul_character_in_rider_id_or_contact():
+    # A NUL byte ("\u0000") is a perfectly ordinary JSON string character
+    # -- neither empty nor whitespace, so neither fix above catches it --
+    # but rider_id/contact end up in a Postgres text column
+    # (app/store.py's RequestStore.add()), and libpq refuses outright to
+    # send a string containing one. Confirmed this was real, not
+    # theoretical, with a live TestClient call before this fix: this exact
+    # payload 500'd inside RequestStore.add()'s session.commit() with
+    # `ValueError: A string literal cannot contain NUL (0x00) characters`,
+    # not a 422 from intake -- the request never got validated away, it
+    # crashed the store instead.
+    payload = _one_off_payload("rider-\x00null", FAIRFAX, ALDIE, 120, 30, contact="555-0000")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_list_requests_never_includes_precise_location_or_contact():
     payload = _one_off_payload(
         "rider-privacy-test-2", FAIRFAX, ALDIE, 120, 30, contact="555-8888-secret"

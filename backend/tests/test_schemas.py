@@ -273,6 +273,21 @@ def test_ride_request_create_keeps_incidental_surrounding_whitespace_on_a_real_v
     assert req.rider_id == " John "
 
 
+@pytest.mark.parametrize("field", ["rider_id", "contact"])
+def test_ride_request_create_rejects_a_nul_character_in_rider_id_or_contact(field):
+    # A NUL byte is neither empty nor whitespace, so Field(min_length=1)
+    # and _reject_blank both let it through -- but rider_id/contact end up
+    # in a Postgres text column (app/store.py's _to_orm()), and libpq
+    # refuses to send a string containing one. Confirmed this was real,
+    # not theoretical, with a live TestClient call before this fix: POST
+    # /requests with rider_id="rider-\u0000null" validated cleanly here
+    # and then 500'd inside RequestStore.add()'s session.commit() with
+    # `ValueError: A string literal cannot contain NUL (0x00) characters`,
+    # not a 422 from intake.
+    with pytest.raises(ValidationError):
+        RideRequestCreate(**_create_payload(**{field: "a\x00b"}))
+
+
 def test_ride_request_itself_still_accepts_an_anonymized_blank_contact():
     # app/store.py's _from_orm() reconstructs a RideRequest straight from
     # a stored row, including an already-anonymized one -- this must keep

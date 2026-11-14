@@ -24,10 +24,36 @@ def _reject_blank(value: str) -> str:
     return value
 
 
-# A string that must have real, non-whitespace content -- not just a
-# non-empty one. See _reject_blank's own docstring for why Field(min_length=1)
-# alone isn't enough here.
-NonBlankStr = Annotated[str, Field(min_length=1), AfterValidator(_reject_blank)]
+def _reject_nul(value: str) -> str:
+    """A NUL byte ("\\u0000") is a perfectly ordinary character as far as a
+    JSON string and Pydantic's str type are concerned -- nothing about
+    Field(min_length=1)/_reject_blank above rejects it, since it's neither
+    empty nor whitespace. But every field this guards (rider_id, contact,
+    an abuse report's reason) ends up as a Postgres text column
+    (app/store.py's _to_orm(), app/reports.py's _to_orm()), and libpq
+    refuses outright to send a string containing one: not a clean
+    ValueError Pydantic could have turned into a 422, but a bare
+    `ValueError: A string literal cannot contain NUL (0x00) characters`
+    raised deep inside psycopg2/SQLAlchemy at commit time, well past any
+    validation. Confirmed this was real, not theoretical, with a live
+    TestClient call before writing this fix: POST /requests with
+    rider_id="rider-\\u0000null" (valid JSON, Pydantic validated it
+    cleanly) 500'd inside RequestStore.add()'s session.commit(), not a
+    422 from intake. Rejecting it here, at the same intake boundary
+    _reject_blank already guards, turns that into a clean 422 instead of
+    an unhandled crash reaching all the way into the DB driver."""
+    if "\x00" in value:
+        raise ValueError("must not contain a NUL character")
+    return value
+
+
+# A string that must have real, non-whitespace content, and must not carry
+# a NUL byte Postgres can't store -- not just a non-empty one. See
+# _reject_blank's and _reject_nul's own docstrings for why
+# Field(min_length=1) alone isn't enough here.
+NonBlankStr = Annotated[
+    str, Field(min_length=1), AfterValidator(_reject_blank), AfterValidator(_reject_nul)
+]
 
 
 class Location(BaseModel):

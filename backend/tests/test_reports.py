@@ -127,6 +127,24 @@ def test_post_report_with_whitespace_only_reason_is_rejected():
     assert _row_count(make_session_factory(), created["id"]) == 0
 
 
+def test_post_report_with_a_nul_character_in_reason_is_rejected():
+    # Same gap as app/schemas.py's RideRequestCreate fields (rider_id/
+    # contact): a NUL byte is neither empty nor whitespace, so it passed
+    # both existing checks cleanly, then 500'd inside ReportStore.add()'s
+    # session.commit() -- libpq refuses to send a string containing one to
+    # Postgres. Confirmed real before the fix: this exact payload crashed
+    # with `ValueError: A string literal cannot contain NUL (0x00)
+    # characters`, not a 422 from intake.
+    payload = _one_off_payload("rider-report-nul-reason", contact="555-0606")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        created = client.post("/requests", json=payload).json()
+        response = client.post(f"/requests/{created['id']}/report", json={"reason": "spam\x00"})
+
+    assert response.status_code == 422
+    assert _row_count(make_session_factory(), created["id"]) == 0
+
+
 def test_report_never_appears_in_any_public_response():
     payload = _one_off_payload("rider-report-privacy", contact="555-0604")
     secret_reason = "very-specific-harassment-detail-xyz"
