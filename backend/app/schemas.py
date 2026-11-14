@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Annotated, Optional, Union
 from uuid import UUID, uuid4
 
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from app.geo import h3_cell
 
@@ -48,6 +48,26 @@ class Location(BaseModel):
 
 
 class OneOffSchedule(BaseModel):
+    # `schedule` is `Union[OneOffSchedule, RecurringSchedule]` with no
+    # discriminator field, so Pydantic's own "smart union" matching is what
+    # decides which member a given dict becomes -- and by default an unknown
+    # field is just dropped, not rejected. A payload carrying fields from
+    # *both* shapes at once (e.g. a non-browser client with leftover
+    # recurring fields still in a dict meant to be one-off, after editing
+    # one schedule type into another) doesn't get caught by either model's
+    # own field validation -- it silently matches whichever shape happens to
+    # come first and the other shape's fields just vanish, no 422, no
+    # indication the request didn't mean what was actually stored. Confirmed
+    # real, not theoretical: POST /requests with both
+    # earliest_departure/latest_departure AND weekdays/earliest_departure_time/
+    # latest_departure_time in the same `schedule` dict returned 201 and
+    # silently became a *recurring* Monday/Tuesday/Wednesday request --
+    # dropping the one-off date entirely with no error, even though nothing
+    # about that input said "recurring" on its own terms. extra="forbid"
+    # makes a field that doesn't belong to either shape a clean 422 instead
+    # of either model quietly accepting a subset of the payload.
+    model_config = ConfigDict(extra="forbid")
+
     earliest_departure: datetime
     latest_departure: datetime
 
@@ -80,6 +100,12 @@ class OneOffSchedule(BaseModel):
 
 
 class RecurringSchedule(BaseModel):
+    # Same reasoning as OneOffSchedule.model_config just above -- without
+    # this, a mixed one-off+recurring payload could just as easily match
+    # *this* shape first instead, silently dropping earliest_departure/
+    # latest_departure instead of weekdays/the time fields.
+    model_config = ConfigDict(extra="forbid")
+
     # Monday=0 .. Sunday=6, matching datetime.date.weekday()
     weekdays: list[int]
     earliest_departure_time: time

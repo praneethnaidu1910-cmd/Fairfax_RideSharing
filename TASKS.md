@@ -61,6 +61,56 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 38. Reject a `schedule` that mixes one-off and recurring fields instead of silently picking one
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one in how `app/schemas.py`'s
+  `schedule: Union[OneOffSchedule, RecurringSchedule]` actually resolves an
+  ambiguous input, not in either schedule model's own field checks.
+- There's no discriminator field telling Pydantic which shape a `schedule`
+  dict is meant to be -- it decides with its own "smart union" matching, and
+  by default an unrecognized field is just dropped, not rejected. That means
+  a dict carrying fields from *both* shapes at once -- plausible from a non-
+  browser client that edited a request from one schedule type to the other
+  and left the old fields in, not something the web form's radio-button UI
+  can produce but nothing stops a raw API client from sending -- doesn't
+  trip either model's own validation. Confirmed this was real, not
+  theoretical, with a live script before writing any fix:
+  `RideRequestCreate` built with a `schedule` dict holding
+  `earliest_departure`/`latest_departure` *and* `weekdays`/
+  `earliest_departure_time`/`latest_departure_time` together validated
+  clean and came back as a `RecurringSchedule` -- the one-off date info just
+  vanished, no error, and `POST /requests` with the same payload returned a
+  real `201`, silently storing a *weekly Monday/Tuesday/Wednesday recurring
+  request* instead of the one-off trip the dropped fields actually named.
+  Nothing anywhere told the caller their request didn't mean what got
+  stored.
+- Fix: both `OneOffSchedule` and `RecurringSchedule` now set
+  `model_config = ConfigDict(extra="forbid")`. A field that belongs to
+  neither shape -- which is exactly what a field belonging to the *other*
+  shape is, from either model's own point of view -- is now a clean `422`
+  instead of silently tolerated. Checked every existing caller that builds
+  one of these from a plain dict (`app/web.py`'s form handler, `app/store.py`'s
+  `_row_to_schedule`, `app/matching/scoring.py`'s `expand_schedule`,
+  `app/privacy.py`'s `fuzz_schedule`) and every schedule dict in the test
+  suite -- all of them already pass only the fields that belong to the
+  shape they're building, so none of them trip the new constraint; this
+  only closes the gap for a payload that mixes the two on purpose or by
+  mistake.
+- Tests: `tests/test_schemas.py` adds
+  `test_ride_request_create_rejects_a_schedule_mixing_one_off_and_recurring_fields`
+  (the exact reproduction above, at the `RideRequestCreate` level) and
+  `test_one_off_schedule_rejects_stray_recurring_fields`/
+  `test_recurring_schedule_rejects_stray_one_off_fields` (each schedule
+  model directly, one stray field from the other shape). `tests/test_requests_api.py`
+  adds the HTTP-level reproduction,
+  `test_create_request_rejects_a_schedule_mixing_one_off_and_recurring_fields`
+  -- the exact mixed-schedule `POST /requests` payload above now `422`s
+  instead of `201`ing as a recurring request. Ran all four against the
+  pre-fix code first (temporarily stashing just `app/schemas.py`) to confirm
+  they actually fail there -- a real `201`/silent `RecurringSchedule`, not
+  just that they pass now. Full suite: 168 tests, up from 164, all green.
+
 ### 37. Reject a timezone-aware departure datetime/time instead of 500ing on it
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug

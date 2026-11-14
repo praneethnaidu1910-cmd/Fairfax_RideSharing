@@ -118,6 +118,48 @@ def test_recurring_schedule_rejects_empty_weekdays():
         )
 
 
+def test_ride_request_create_rejects_a_schedule_mixing_one_off_and_recurring_fields():
+    # `schedule` is `Union[OneOffSchedule, RecurringSchedule]` with no
+    # discriminator -- before extra="forbid", a dict carrying fields from
+    # both shapes at once silently matched RecurringSchedule (the second
+    # Union member) and dropped earliest_departure/latest_departure
+    # entirely, no error, even though the input never said "this is a
+    # recurring request" on its own terms.
+    with pytest.raises(ValidationError):
+        RideRequestCreate(
+            rider_id="rider-1",
+            origin=Location(lat=38.8462, lng=-77.3064),
+            destination=Location(lat=38.9757, lng=-77.6122),
+            schedule={
+                "earliest_departure": "2026-12-01T09:00:00",
+                "latest_departure": "2026-12-01T09:30:00",
+                "weekdays": [0, 1, 2],
+                "earliest_departure_time": "09:00:00",
+                "latest_departure_time": "09:30:00",
+            },
+            contact="555-0000",
+        )
+
+
+def test_one_off_schedule_rejects_stray_recurring_fields():
+    with pytest.raises(ValidationError):
+        OneOffSchedule(
+            earliest_departure=datetime.utcnow(),
+            latest_departure=datetime.utcnow() + timedelta(minutes=30),
+            weekdays=[0, 1],
+        )
+
+
+def test_recurring_schedule_rejects_stray_one_off_fields():
+    with pytest.raises(ValidationError):
+        RecurringSchedule(
+            weekdays=[0, 1],
+            earliest_departure_time=time(9, 0),
+            latest_departure_time=time(9, 30),
+            earliest_departure=datetime.utcnow(),
+        )
+
+
 def test_contact_present_on_model_but_not_required_serialized_elsewhere():
     # Flags the field per TASKS.md #1; excluding it from pre-match API
     # responses is task 6's response-shaping work, not tested here.

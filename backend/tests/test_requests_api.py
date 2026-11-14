@@ -96,6 +96,41 @@ def test_create_request_rejects_timezone_aware_departure_times():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_a_schedule_mixing_one_off_and_recurring_fields():
+    # app/schemas.py's OneOffSchedule/RecurringSchedule now both set
+    # extra="forbid". Before this, `schedule` carrying fields from *both*
+    # shapes at once -- plausible from a non-browser client with leftover
+    # fields from editing one schedule type into another -- didn't 422 at
+    # all: Pydantic's smart-union matching on `Union[OneOffSchedule,
+    # RecurringSchedule]` silently picked RecurringSchedule (the second
+    # member) and just dropped earliest_departure/latest_departure, so this
+    # returned 201 as a weekly Mon/Tue/Wed recurring request instead of the
+    # one-off trip the earliest_departure/latest_departure fields actually
+    # named -- no error, no sign the stored request didn't mean what was
+    # posted.
+    earliest = datetime.utcnow() + timedelta(hours=2)
+    latest = earliest + timedelta(minutes=30)
+    payload = {
+        "rider_id": "rider-mixed-schedule",
+        "origin": {"lat": FAIRFAX[0], "lng": FAIRFAX[1]},
+        "destination": {"lat": ALDIE[0], "lng": ALDIE[1]},
+        "schedule": {
+            "earliest_departure": earliest.isoformat(),
+            "latest_departure": latest.isoformat(),
+            "weekdays": [0, 1, 2],
+            "earliest_departure_time": "09:00:00",
+            "latest_departure_time": "09:30:00",
+        },
+        "seats_needed": 1,
+        "contact": "555-0602",
+    }
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_create_request_rejects_empty_contact():
     # app/schemas.py's RideRequestCreate now requires a non-empty contact
     # -- before this, an empty string was accepted (201), stored, and
