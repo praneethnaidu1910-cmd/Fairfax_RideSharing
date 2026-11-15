@@ -55,6 +55,25 @@ NonBlankStr = Annotated[
     str, Field(min_length=1), AfterValidator(_reject_blank), AfterValidator(_reject_nul)
 ]
 
+# app/models.py's seats_needed column is a plain Postgres INTEGER (4
+# bytes) -- a signed value past this range can't be stored at all, the
+# same "the DB column has a real limit the schema never enforced" shape
+# as the NUL-byte fix above, just on seats_needed instead of
+# rider_id/contact. Field(ge=1) alone put a floor on this field but never
+# a ceiling, so a value past this range used to validate cleanly through
+# RideRequestCreate/RideRequest and then crash deep inside the DB driver
+# at session.commit() instead of 422ing at intake. Confirmed this was
+# real, not theoretical, with a live TestClient call before this fix:
+# POST /requests with seats_needed=99999999999999 validated cleanly here
+# and then raised a bare `psycopg2.errors.NumericValueOutOfRange: integer
+# out of range` inside RequestStore.add()'s session.commit(), a real 500,
+# not a 422 from intake. This is the actual INTEGER column's own limit,
+# not a stance on how many people a real ride pool should fit -- that's
+# already a separate, hard capacity constraint the matching engine checks
+# on its own (app/matching/scoring.py's capacity_fits()), not something
+# this bound needs to guess at.
+MAX_SEATS_NEEDED = 2_147_483_647
+
 
 class Location(BaseModel):
     # Real-world latitude/longitude bounds -- without these a client typo
@@ -187,7 +206,7 @@ class RideRequest(BaseModel):
     destination: Location
     # One-off window or a recurring weekday pattern -- never both.
     schedule: Union[OneOffSchedule, RecurringSchedule]
-    seats_needed: int = Field(default=1, ge=1)
+    seats_needed: int = Field(default=1, ge=1, le=MAX_SEATS_NEEDED)
     # Collected at request time so a match can reach the other party; must
     # not appear in any pre-match serialized response (TASKS.md #6).
     contact: str
@@ -236,7 +255,7 @@ class RideRequestCreate(BaseModel):
     origin: Location
     destination: Location
     schedule: Union[OneOffSchedule, RecurringSchedule]
-    seats_needed: int = Field(default=1, ge=1)
+    seats_needed: int = Field(default=1, ge=1, le=MAX_SEATS_NEEDED)
     contact: NonBlankStr
 
 

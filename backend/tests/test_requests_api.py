@@ -189,6 +189,25 @@ def test_create_request_rejects_a_nul_character_in_rider_id_or_contact():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_seats_needed_beyond_postgres_integer_range():
+    # app/models.py's seats_needed column is a plain Postgres INTEGER (4
+    # bytes) -- Field(ge=1) on RideRequestCreate/RideRequest put a floor
+    # on this field but never a ceiling, so a value past the column's
+    # signed range used to validate cleanly through intake and crash deep
+    # inside the DB driver instead. Confirmed this was real, not
+    # theoretical, with a live TestClient call before this fix: this
+    # exact payload 500'd inside RequestStore.add()'s session.commit()
+    # with `psycopg2.errors.NumericValueOutOfRange: integer out of
+    # range`, not a 422 from intake.
+    payload = _one_off_payload("rider-huge-party", FAIRFAX, ALDIE, 120, 30, contact="555-0603")
+    payload["seats_needed"] = 99_999_999_999_999
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_list_requests_never_includes_precise_location_or_contact():
     payload = _one_off_payload(
         "rider-privacy-test-2", FAIRFAX, ALDIE, 120, 30, contact="555-8888-secret"

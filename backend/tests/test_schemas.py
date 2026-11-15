@@ -288,6 +288,38 @@ def test_ride_request_create_rejects_a_nul_character_in_rider_id_or_contact(fiel
         RideRequestCreate(**_create_payload(**{field: "a\x00b"}))
 
 
+def test_ride_request_create_rejects_seats_needed_beyond_postgres_integer_range():
+    # Field(ge=1) put a floor on seats_needed but never a ceiling --
+    # app/models.py's seats_needed column is a plain Postgres INTEGER (4
+    # bytes), so a value past its signed range can't be stored at all.
+    # Confirmed this was real, not theoretical, with a live TestClient
+    # call before this fix: POST /requests with
+    # seats_needed=99999999999999 validated cleanly here and then raised
+    # a bare `psycopg2.errors.NumericValueOutOfRange: integer out of
+    # range` inside RequestStore.add()'s session.commit(), a real 500,
+    # not a 422 from intake.
+    with pytest.raises(ValidationError):
+        RideRequestCreate(**_create_payload(seats_needed=99_999_999_999_999))
+
+
+def test_ride_request_itself_also_rejects_seats_needed_beyond_postgres_integer_range():
+    # Same bound on the internal/stored shape, not just the intake
+    # boundary -- unlike rider_id/contact (NonBlankStr), there's no
+    # legitimate already-stored row this would ever need to still load:
+    # nothing in this codebase ever raises a request's own seats_needed
+    # after intake, so a stored row can never legitimately carry a value
+    # this fix wouldn't already have rejected on the way in.
+    with pytest.raises(ValidationError):
+        RideRequest(
+            rider_id="rider-x",
+            origin=Location(lat=38.8462, lng=-77.3064),
+            destination=Location(lat=38.9586, lng=-77.3570),
+            schedule=_one_off_schedule(),
+            seats_needed=99_999_999_999_999,
+            contact="555-0199",
+        )
+
+
 def test_ride_request_itself_still_accepts_an_anonymized_blank_contact():
     # app/store.py's _from_orm() reconstructs a RideRequest straight from
     # a stored row, including an already-anonymized one -- this must keep

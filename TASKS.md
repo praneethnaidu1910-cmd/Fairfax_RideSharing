@@ -61,6 +61,53 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 40. Reject a seats_needed past Postgres' INTEGER range instead of 500ing inside the DB driver
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one right next to task 39's
+  own NUL-byte fix: the same "a DB column has a real limit the schema never
+  enforced" shape, just on `seats_needed` instead of `rider_id`/`contact`.
+- `app/schemas.py`'s `RideRequestCreate.seats_needed`/`RideRequest.seats_needed`
+  had `Field(ge=1)` -- a floor, but no ceiling -- while `app/models.py`'s
+  `seats_needed` column is a plain Postgres `INTEGER` (4 bytes, signed range
+  up to 2147483647). Confirmed this was real, not theoretical, with a live
+  `TestClient` call before writing any fix: `POST /requests` with
+  `seats_needed=99999999999999` validated cleanly through
+  `RideRequestCreate`, then 500'd inside `RequestStore.add()`'s
+  `session.commit()` with a bare `sqlalchemy.exc.DataError` wrapping
+  `psycopg2.errors.NumericValueOutOfRange: integer out of range`, the exact
+  same "validates fine, crashes three
+  layers down inside the DB driver" shape as task 39's NUL byte and task
+  37's timezone-aware datetime, just on an integer column overflowing
+  instead of a text column rejecting a byte or a naive/aware datetime
+  comparison blowing up.
+- Fix: new `MAX_SEATS_NEEDED = 2_147_483_647` constant (named, not a magic
+  number, same pattern as `scoring.py`'s weights) and `Field(ge=1,
+  le=MAX_SEATS_NEEDED)` on both `RideRequestCreate.seats_needed` and
+  `RideRequest.seats_needed`. Deliberately tied to the actual Postgres
+  `INTEGER` column's own signed range, not to any opinion about how large a
+  real ride-pool party should be -- that's a separate question the engine's
+  own hard capacity constraint (`app/matching/scoring.py`'s
+  `capacity_fits()`) already handles on its own terms, and this fix doesn't
+  need to guess at it to stop the crash. Added the bound to `RideRequest`
+  itself too, not just the `RideRequestCreate` intake boundary -- unlike
+  `rider_id`/`contact` (`NonBlankStr`), there's no legitimate
+  already-anonymized or otherwise-mutated stored row this would ever need
+  to still load, since nothing in this codebase ever raises a request's own
+  `seats_needed` after intake.
+- Tests: `tests/test_schemas.py` adds
+  `test_ride_request_create_rejects_seats_needed_beyond_postgres_integer_range`
+  and `test_ride_request_itself_also_rejects_seats_needed_beyond_postgres_integer_range`
+  (both models, the exact `99_999_999_999_999` reproduction above).
+  `tests/test_requests_api.py` adds the HTTP-level reproduction,
+  `test_create_request_rejects_seats_needed_beyond_postgres_integer_range`
+  -- the exact `seats_needed=99999999999999` payload above now `422`s
+  instead of `500`ing. Ran all three against the pre-fix code first
+  (temporarily stashing just `app/schemas.py`) to confirm they actually
+  fail there -- a real `500`/`DataError` for the HTTP test, a clean
+  "did not raise" for the two model-level tests, not just that they pass
+  now. Full suite: 175 tests, up from 172, all green.
+
 ### 39. Reject a NUL character in rider_id/contact/report-reason instead of 500ing inside the DB driver
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the
