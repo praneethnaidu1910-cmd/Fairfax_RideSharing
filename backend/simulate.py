@@ -4,11 +4,14 @@ Replays app/sample_data.py's SAMPLE_REQUESTS against a *running* server
 (`uvicorn app.main:app --reload` in another terminal) with staggered,
 compressed timing -- "requests trickle in over the evening," per
 docs/MATCHING_ALGORITHM.md's real-time section, compressed into a run
-that's quick to watch instead of hours long. A second task subscribes to
-`WS /matches` the whole time and prints each match as it arrives, so match
-events show up interleaved with the posts that produced them, not batched
-at the end -- proof the incremental pipeline (TASKS.md #5) is actually
-real-time and not a batch job wearing a websocket.
+that's quick to watch instead of hours long. One filtered `WS /matches`
+connection per posted request (see _publish_and_watch()'s own docstring --
+this used to be a single global connection, until that turned out to be a
+real, exploitable privacy leak, not just this script's own concern) prints
+each match as it arrives, so match events show up interleaved with the
+posts that produced them, not batched at the end -- proof the incremental
+pipeline (TASKS.md #5) is actually real-time and not a batch job wearing a
+websocket.
 
 Usage, from the repo root, with the server already running:
 
@@ -52,63 +55,99 @@ def _elapsed(start: float) -> str:
     return f"{time.monotonic() - start:6.2f}s"
 
 
-async def _subscribe(
-    base_url: str, rider_names: dict, start: float, connected: asyncio.Event, stop: asyncio.Event
+async def _publish_and_watch(
+    client: httpx.AsyncClient,
+    ws_url: str,
+    rider_names: dict,
+    start: float,
+    total_seconds: float,
+    printed: set,
+    stop: asyncio.Event,
+) -> list["asyncio.Task[None]"]:
+    """Posts the whole sample dataset, opening one filtered /matches
+    connection per request along the way.
+
+    GET /matches now only ever forwards a match that actually names the id
+    a connection registers for (TASKS.md's fix for a real leak: it used to
+    broadcast every match to every connection, no auth required) -- so
+    there's no single global feed left to watch the whole run from one
+    socket the way this used to. One connection per posted request plus
+    `printed` (shared across all of them, see _drain()) gets back to the
+    same "every match prints once, as it happens" behavior this had before.
+
+    Each connection is opened -- and so already subscribed server-side --
+    *before* its own request is posted, not after: a match involving that
+    request can be produced essentially immediately, inside the same
+    event-loop hop that processes the POST, and nothing racing that gap is
+    lost as long as the subscription itself started first (see
+    app/router.py's stream_matches() for the server side of this).
+    """
+    gap = total_seconds / max(len(SAMPLE_REQUESTS) - 1, 1)
+    watchers: list[asyncio.Task[None]] = []
+    for index, request in enumerate(SAMPLE_REQUESTS):
+        websocket = await websockets.connect(ws_url)
+        response = await client.post("/requests", json=_payload(request))
+        response.raise_for_status()
+        request_id = response.json()["id"]
+        rider_names[request_id] = request.rider_id
+        print(
+            f"[{_elapsed(start)}] POSTED {request.rider_id}: "
+            f"{request.origin.lat:.4f},{request.origin.lng:.4f} -> "
+            f"{request.destination.lat:.4f},{request.destination.lng:.4f}"
+        )
+        await websocket.send(json.dumps({"request_id": request_id}))
+        watchers.append(
+            asyncio.create_task(_drain(websocket, rider_names, start, printed, stop))
+        )
+        if index < len(SAMPLE_REQUESTS) - 1:
+            await asyncio.sleep(gap)
+    return watchers
+
+
+async def _drain(
+    websocket, rider_names: dict, start: float, printed: set, stop: asyncio.Event
 ) -> None:
-    ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://") + "/matches"
-    async with websockets.connect(ws_url) as websocket:
-        connected.set()
+    """Reads one request's filtered match feed until `stop` is set, printing
+    any match not already printed by the *other* party's own connection --
+    a match arrives on both sides of a pair's feeds, so `printed` (a set of
+    `frozenset(request_ids)`, shared across every _drain() call this run)
+    is what keeps it from printing twice."""
+    try:
         while not stop.is_set():
             try:
                 raw = await asyncio.wait_for(websocket.recv(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
             match = json.loads(raw)
+            key = frozenset(match["request_ids"])
+            if key in printed:
+                continue
+            printed.add(key)
             names = [rider_names.get(rid, rid) for rid in match["request_ids"]]
             print(
                 f"[{_elapsed(start)}] MATCH  {names[0]} <-> {names[1]}  "
                 f"score={match['score']:.2f}  ({match['reason']})"
             )
-
-
-async def _publish(client: httpx.AsyncClient, rider_names: dict, start: float, total_seconds: float) -> None:
-    gap = total_seconds / max(len(SAMPLE_REQUESTS) - 1, 1)
-    for index, request in enumerate(SAMPLE_REQUESTS):
-        response = await client.post("/requests", json=_payload(request))
-        response.raise_for_status()
-        rider_names[response.json()["id"]] = request.rider_id
-        print(
-            f"[{_elapsed(start)}] POSTED {request.rider_id}: "
-            f"{request.origin.lat:.4f},{request.origin.lng:.4f} -> "
-            f"{request.destination.lat:.4f},{request.destination.lng:.4f}"
-        )
-        if index < len(SAMPLE_REQUESTS) - 1:
-            await asyncio.sleep(gap)
+    finally:
+        await websocket.close()
 
 
 async def run(base_url: str, total_seconds: float, settle_seconds: float) -> None:
     start = time.monotonic()
     rider_names: dict = {}
-    connected = asyncio.Event()
+    printed: set = set()
     stop = asyncio.Event()
-
-    subscriber = asyncio.create_task(_subscribe(base_url, rider_names, start, connected, stop))
-    connected_waiter = asyncio.create_task(connected.wait())
-    # Race the "connected" signal against the subscriber task itself finishing
-    # early (e.g. connection refused) -- otherwise a dead server just hangs
-    # here forever instead of raising, since connected.set() would never come.
-    done, _pending = await asyncio.wait({subscriber, connected_waiter}, return_when=asyncio.FIRST_COMPLETED)
-    if subscriber in done:
-        connected_waiter.cancel()
-        subscriber.result()  # re-raises whatever killed the subscriber
-    connected_waiter.cancel()
+    ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://") + "/matches"
 
     async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
-        await _publish(client, rider_names, start, total_seconds)
+        watchers = await _publish_and_watch(
+            client, ws_url, rider_names, start, total_seconds, printed, stop
+        )
 
     await asyncio.sleep(settle_seconds)
     stop.set()
-    await subscriber
+    for watcher in watchers:
+        await watcher
 
 
 def main() -> None:

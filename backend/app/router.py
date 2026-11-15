@@ -154,21 +154,69 @@ def report_request(request_id: UUID, payload: AbuseReportCreate, request: Reques
 
 @router.websocket("/matches")
 async def stream_matches(websocket: WebSocket) -> None:
-    """Streams each MatchGroup as the engine finds it.
+    """Streams each MatchGroup involving *this connection's own* request --
+    never every match that happens, no matter who's watching.
 
     Each connection gets its own queue from engine.subscribe() (TASKS.md
     #12) instead of reading engine.matches directly, so N simultaneous
     connections each receive a copy of every match rather than splitting
     them competing-consumer style -- the two-browser-tabs case #12's
-    acceptance criterion needs actually works now.
+    acceptance criterion needs.
+
+    Used to forward every one of those copies straight to the client with
+    no filtering at all -- which meant a completely uninvolved connection,
+    one that never posted a request of its own, received both parties'
+    request ids for *every* match anyone made, just by opening this
+    endpoint (no auth gates it, SCOPE.md: no SMS/OTP for the MVP). That's
+    not a theoretical leak: app/router.py's own get_request() treats
+    knowing a request's id as the *only* proof needed to view that
+    request's precise origin/destination/contact once it's matched (its
+    own docstring: the id is "unguessable... and never displayed to
+    anyone else -- doubling as proof"). Confirmed real with a live
+    TestClient script before writing this fix: a third connection that
+    posted nothing received a real match's two ids straight off this
+    endpoint, then called GET /requests/{id}?viewer_request_id=<the other
+    id from that event> and got back a stranger's full precise pickup/
+    dropoff and contact -- exactly the thing SCOPE.md says gets
+    "exchanged only between two people after they mutually match -- never
+    broadcast," broadcast to a party that was never one of the two.
+    Nothing about that exploit needed guessing either id; this endpoint
+    handed both of them over for free.
+
+    Fix: the first message a connection sends after opening is the id of
+    the one request it's actually watching (app/static/live.js sends it
+    right after the socket opens -- by the time that page exists, the
+    rider's own id is already known, it was handed back by POST
+    /requests). Only a MatchGroup that actually names that id gets
+    forwarded; everything else is drained from this connection's own
+    queue and dropped. Subscribing to the engine happens *before* waiting
+    for that id, not after -- a match involving this connection's own
+    request can be produced essentially immediately (scored against
+    whatever's already pooled, inside the same event-loop hop that
+    processes a brand-new POST), so subscribing first means nothing
+    racing in that gap is lost; it just sits in this connection's own
+    queue, still in order, until the id arrives and the loop below starts
+    checking against it.
     """
     await websocket.accept()
     engine = websocket.app.state.engine
     queue = engine.subscribe()
     try:
+        try:
+            registration = await websocket.receive_json()
+            my_request_id = UUID(str(registration["request_id"]))
+        except WebSocketDisconnect:
+            return
+        except Exception:
+            # Malformed/missing registration -- close rather than hang
+            # forever waiting for one that will never parse.
+            await websocket.close(code=1008)
+            return
+
         while True:
             match = await queue.get()
-            await websocket.send_json(match.model_dump(mode="json"))
+            if my_request_id in match.request_ids:
+                await websocket.send_json(match.model_dump(mode="json"))
     except WebSocketDisconnect:
         pass
     finally:

@@ -61,6 +61,87 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 41. Stop /matches from broadcasting every match's request ids to every connection, not just the two people in it
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found a real privacy hole in
+  `app/router.py`'s `stream_matches()` -- the WS endpoint itself, not a
+  validation gap next to it the way most of the last dozen entries here
+  were.
+- `GET /requests/{id}?viewer_request_id=` (TASKS.md #7) treats knowing a
+  request's own id as the *only* proof needed to view that request's
+  precise origin/destination/contact once it's matched -- its own
+  docstring says the id is "unguessable... and never displayed to anyone
+  else -- doubling as proof." But `stream_matches()` had no registration
+  step at all: it `await websocket.accept()`ed, subscribed, and forwarded
+  *every* `MatchGroup` straight to *every* connected client, no auth
+  required to connect (SCOPE.md: no SMS/OTP for the MVP, so there's
+  nothing gating who can open this endpoint at all). That handed both
+  halves of every match's ids to a completely uninvolved third party for
+  free -- directly contradicting SCOPE.md's own "exact pickup point and
+  contact info are exchanged only between two people after they mutually
+  match -- never broadcast." Confirmed this was real, not theoretical,
+  with a live `TestClient` script before writing any fix: a connection
+  that never posted a request of its own, and never identified itself as
+  anyone, opened `/matches`, received a real match's two request ids off
+  that raw broadcast, and then called `GET
+  /requests/{a_id}?viewer_request_id=<the other id from that event>` and
+  got back a `200` with that stranger's full precise pickup/dropoff and
+  real contact info -- a complete stranger's "proof of involvement,"
+  handed over by the one channel that was supposed to make it
+  unguessable.
+- Fix: `stream_matches()` now requires the first message a connection sends
+  after opening to be its own request id (`{"request_id": "<uuid>"}`); only
+  a `MatchGroup` that actually names that id gets forwarded, everything
+  else is drained from this connection's own queue and silently dropped.
+  Subscribing to the engine (`queue = engine.subscribe()`) still happens
+  *before* waiting for that id, not after -- a match involving this
+  connection's own request can be produced essentially immediately
+  (scored against whatever's already pooled, inside the same event-loop
+  hop that processes a brand-new `POST`), so subscribing first means
+  nothing racing that gap is lost; it just sits in this connection's own
+  queue, in order, until the id arrives. A malformed/missing registration
+  (bad JSON, no `request_id` field, not a real UUID) closes the socket
+  (code `1008`) instead of hanging forever waiting for one that'll never
+  parse. `app/static/live.js` sends its own id right after the socket
+  opens -- by the time that page exists the rider's own id is already
+  known, handed back by `POST /requests` -- and keeps its existing
+  client-side id check too, as a harmless belt-and-suspenders second
+  layer, not the only layer anymore. `app/matching/engine.py` itself is
+  untouched: `subscribe()`/`unsubscribe()` still hand back a raw,
+  unfiltered copy of every match to whoever asks, exactly as before --
+  that's an internal, non-networked mechanism now gated by the one real
+  entry point that exposes it over the network, not the thing that needed
+  fixing.
+- `simulate.py` used to open one global, unfiltered `/matches` connection
+  to narrate every match in the demo run -- that's exactly the capability
+  this fix removes, so it now opens one filtered connection *per posted
+  request* instead (connected, and so already subscribed, *before* that
+  request is posted, for the same race-safety reason as the router's own
+  fix), with a shared `printed` set deduping a match that would otherwise
+  arrive once from each side of the pair's own feed. Same "every match
+  prints once, as it happens" demo behavior as before, just without
+  resurrecting a global broadcast to get it.
+- Tests: `tests/test_live_matches.py` adds
+  `test_a_connection_never_receives_a_match_it_did_not_register_for` (the
+  real reproduction above -- a connection that posts nothing, sits
+  through an unrelated `a<->b` match while still unregistered, then
+  registers for a *different* `c<->d` pair and asserts that `c<->d` is
+  the only thing it ever receives, proving `a<->b` was dropped server-side
+  rather than just not-yet-delivered) and
+  `test_a_connection_with_a_malformed_registration_is_closed_not_left_hanging`.
+  Updated every existing `/matches` test
+  (`tests/test_requests_api.py`'s three, `tests/test_live_matches.py`'s
+  two) to register with the right id before expecting a match --
+  including the two-simultaneous-tabs test, now explicitly registering
+  both tabs for the *same* rider's own request, which is the real
+  two-tabs scenario (one rider, two devices) this was always meant to
+  cover. Ran the new regression test against the pre-fix code first
+  (temporarily stashing just `app/router.py`) to confirm it actually fails
+  there -- the unregistered bystander received `a<->b` as its first
+  message, not `c<->d` -- not just that it passes now. Full suite: 177
+  tests, up from 175, all green.
+
 ### 40. Reject a seats_needed past Postgres' INTEGER range instead of 500ing inside the DB driver
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

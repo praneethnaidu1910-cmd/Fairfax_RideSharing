@@ -264,9 +264,15 @@ def test_websocket_streams_a_match_between_two_compatible_requests():
     with TestClient(app) as client:
         with client.websocket_connect("/matches") as websocket:
             first = client.post("/requests", json=first_payload)
-            second = client.post("/requests", json=second_payload)
-
             assert first.status_code == 201
+            # Register this connection against the first request's own id
+            # right away -- before posting the second request, which is
+            # what can actually produce the match (app/router.py's
+            # stream_matches() subscribes before waiting for this message,
+            # so nothing in between is lost either way).
+            websocket.send_json({"request_id": first.json()["id"]})
+
+            second = client.post("/requests", json=second_payload)
             assert second.status_code == 201
 
             match_event = websocket.receive_json()
@@ -283,6 +289,7 @@ def test_matched_counterpart_gets_full_view_everyone_else_gets_redacted():
     with TestClient(app) as client:
         with client.websocket_connect("/matches") as websocket:
             a = client.post("/requests", json=payload_a).json()
+            websocket.send_json({"request_id": a["id"]})
             b = client.post("/requests", json=payload_b).json()
             websocket.receive_json()  # block until the two are actually matched
 
@@ -377,6 +384,7 @@ def test_cancel_a_matched_request_returns_409():
     with TestClient(app) as client:
         with client.websocket_connect("/matches") as websocket:
             a = client.post("/requests", json=payload_a).json()
+            websocket.send_json({"request_id": a["id"]})
             client.post("/requests", json=payload_b)
             websocket.receive_json()  # block until the two are actually matched
 

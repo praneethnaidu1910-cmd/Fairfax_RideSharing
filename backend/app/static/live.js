@@ -15,10 +15,19 @@
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(protocol + "//" + window.location.host + "/matches");
 
+  socket.addEventListener("open", () => {
+    // Tell the server which request this connection is actually watching
+    // -- it only forwards a match that names this id (see
+    // app/router.py's stream_matches() docstring: this used to be a
+    // real, exploitable leak, not a defense-in-depth nicety -- every
+    // connection used to receive every match's ids, no auth required).
+    socket.send(JSON.stringify({ request_id: myId }));
+  });
+
   socket.addEventListener("message", async (event) => {
     const match = JSON.parse(event.data);
     if (!match.request_ids.includes(myId)) {
-      return; // some other rider's match -- every connection sees every match
+      return; // belt-and-suspenders -- the server already filters this
     }
 
     const counterpartId = match.request_ids.find((id) => id !== myId);
