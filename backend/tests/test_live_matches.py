@@ -133,6 +133,44 @@ def test_a_connection_with_a_malformed_registration_is_closed_not_left_hanging()
                 websocket.receive_json()
 
 
+def test_a_connection_that_never_registers_is_closed_after_a_timeout_not_left_hanging_forever():
+    """Regression test for a real resource leak in this exact route. Before
+    this fix, stream_matches() had no timeout on the wait for a
+    connection's registration message -- a connection that opened and then
+    sent nothing (not malformed, just silent; SCOPE.md's open-join/no-auth
+    model lets anyone do this with a bare WebSocket client) sat in
+    `await websocket.receive_json()` forever, while fully subscribed
+    (engine.subscribe() already ran before that wait). Every match anyone
+    else made from then on got queued for it same as any real subscriber,
+    but nothing ever called queue.get() to drain it, so those matches just
+    piled up, undelivered, for as long as the connection stayed up.
+    Confirmed real with a live script before this fix: three unrelated
+    matches made while a connection sat open and unregistered all piled up
+    in that connection's own queue (qsize() == 3), with the connection
+    still sitting in engine._subscribers.
+
+    Shrinks app.router.REGISTRATION_TIMEOUT_SECONDS so this test doesn't
+    wait out the real 10s default (same pattern as task 30's rate-limiter
+    test shrinking MIN_SECONDS_BETWEEN_REQUESTS).
+    """
+    import app.router as router_module
+
+    original_timeout = router_module.REGISTRATION_TIMEOUT_SECONDS
+    router_module.REGISTRATION_TIMEOUT_SECONDS = 0.2
+    try:
+        with TestClient(app) as client:
+            engine = app.state.engine
+            with client.websocket_connect("/matches") as websocket:
+                with pytest.raises(WebSocketDisconnect):
+                    websocket.receive_json()
+            # Gone from the engine's own subscriber list too, not just
+            # closed client-side -- otherwise nothing stops its queue from
+            # still being fed (and growing) by every match after this.
+            assert not engine._subscribers
+    finally:
+        router_module.REGISTRATION_TIMEOUT_SECONDS = original_timeout
+
+
 def test_mine_page_shows_waiting_before_match_and_reveal_after():
     payload_a = _one_off_payload("rider-mine-a", FAIRFAX, ALDIE, 120, 30, contact="555-0501")
     payload_b = _one_off_payload(

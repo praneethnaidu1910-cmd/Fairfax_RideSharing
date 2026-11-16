@@ -6,6 +6,7 @@ client:` block in tests gets a fresh engine/store instead of leaking
 matched state between tests.
 """
 
+import asyncio
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -25,6 +26,15 @@ from app.schemas import (
 )
 
 router = APIRouter()
+
+# How long stream_matches() below waits for a freshly-opened connection to
+# send its registration message before giving up on it. app/static/live.js
+# sends its id immediately once the socket opens, so a real browser client
+# clears this in milliseconds -- this is only ever hit by a connection that
+# never registers at all (a dropped client, a stalled script, or anyone
+# just opening the endpoint and going quiet, which SCOPE.md's open-join/no-
+# auth model lets anyone do with nothing more than a raw WebSocket client).
+REGISTRATION_TIMEOUT_SECONDS = 10.0
 
 
 @router.get("/geocode", response_model=Location)
@@ -197,19 +207,41 @@ async def stream_matches(websocket: WebSocket) -> None:
     racing in that gap is lost; it just sits in this connection's own
     queue, still in order, until the id arrives and the loop below starts
     checking against it.
+
+    The wait for that registration message is itself bounded by
+    REGISTRATION_TIMEOUT_SECONDS. Before this fix it wasn't: a connection
+    that opened and then sent nothing at all -- not malformed, just silent,
+    which SCOPE.md's no-auth/open-join model lets anyone do with a bare
+    WebSocket client, no browser required -- sat in
+    `await websocket.receive_json()` forever. engine.subscribe() above had
+    already handed it a real queue, and every match found from then on got
+    `put()` onto that queue by run_forever() same as any other subscriber's
+    -- but with the receive loop permanently stuck waiting on a message
+    that was never coming, nothing ever called queue.get() to drain it, so
+    every one of those matches just sat there, undelivered and
+    undeliverable, for as long as the connection (and the process) stayed
+    up. Confirmed real, not theoretical, with a live TestClient script
+    before writing this fix: a connection opened and left registered with
+    nothing, while three unrelated matches were made elsewhere -- all three
+    piled up in that connection's own queue (`qsize() == 3`), and the
+    connection itself was still sitting in `engine._subscribers`, neither
+    of which a correctly-behaving connection should ever accumulate.
     """
     await websocket.accept()
     engine = websocket.app.state.engine
     queue = engine.subscribe()
     try:
         try:
-            registration = await websocket.receive_json()
+            registration = await asyncio.wait_for(
+                websocket.receive_json(), timeout=REGISTRATION_TIMEOUT_SECONDS
+            )
             my_request_id = UUID(str(registration["request_id"]))
         except WebSocketDisconnect:
             return
         except Exception:
-            # Malformed/missing registration -- close rather than hang
-            # forever waiting for one that will never parse.
+            # Malformed/missing registration, or the timeout above firing
+            # because none ever arrived -- close rather than leave this
+            # connection (and its queue) sitting around forever.
             await websocket.close(code=1008)
             return
 

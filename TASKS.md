@@ -61,6 +61,59 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 42. Close a `/matches` connection that never registers instead of leaking it (and its queue) forever
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one right next to task 41's
+  own fix in `stream_matches()` -- not a privacy leak this time, a resource
+  leak in the registration step that fix added.
+- Task 41 made `stream_matches()` wait for a connection's first message (its
+  own `request_id`) before forwarding it anything, closing a real privacy
+  hole. But that wait, `await websocket.receive_json()`, had no timeout --
+  and `engine.subscribe()` runs *before* it, on purpose, so the connection
+  is already a real subscriber, with a real queue, the moment it opens, long
+  before it ever registers. SCOPE.md's open-join/no-auth model means nothing
+  stops any client -- not just a browser running `live.js`, which does send
+  its id immediately -- from opening this endpoint with a bare WebSocket
+  client and simply never sending anything. For as long as that connection
+  stays open, every match anyone else makes gets `put()` onto its queue by
+  `run_forever()` same as any other subscriber's, but nothing ever reaches
+  the `queue.get()` loop to drain it, since that loop is gated behind the
+  registration wait that never resolves. Confirmed this was real, not
+  theoretical, with a live `TestClient` script before writing any fix:
+  opened one connection and sent it nothing, posted three unrelated matched
+  pairs, and that idle connection's own queue (reached directly off
+  `engine._subscribers`) had all three sitting in it, `qsize() == 3`, with
+  the connection itself still present in `engine._subscribers` -- a
+  real, unbounded-over-time memory leak (one queue per never-registered
+  connection, growing by one entry per match made anywhere on the server,
+  for as long as the process runs) and a dangling server-side task/socket
+  that nothing ever closes, from an endpoint anyone can reach with zero
+  authentication.
+- Fix: a new named `REGISTRATION_TIMEOUT_SECONDS` constant (10.0) and
+  `asyncio.wait_for()` around the registration `receive_json()` call. A real
+  client (`app/static/live.js` sends its id the instant the socket opens)
+  clears this in milliseconds and never notices it; a connection that never
+  registers now gets closed (code `1008`, the same code the existing
+  malformed-registration path already used) once the timeout fires instead
+  of being left open indefinitely -- `asyncio.TimeoutError` falls through
+  the same `except Exception:` branch that already handled a malformed
+  registration, so no new branch was needed, just the timeout itself.
+- Tests: `tests/test_live_matches.py` adds
+  `test_a_connection_that_never_registers_is_closed_after_a_timeout_not_left_hanging_forever`
+  -- the exact reproduction above (connect, send nothing), asserting the
+  connection gets a `WebSocketDisconnect` on its next receive *and* that it's
+  actually gone from `engine._subscribers`, not just closed client-side.
+  Shrinks `app.router.REGISTRATION_TIMEOUT_SECONDS` to `0.2` for the
+  duration of the test (restored in a `finally`) so it doesn't have to wait
+  out the real 10s default, same pattern as task 30's rate-limiter test
+  shrinking `MIN_SECONDS_BETWEEN_REQUESTS`. Ran it against the pre-fix code
+  first (temporarily stashing just `app/router.py`) to confirm it actually
+  fails there -- it does, with an `AttributeError` since
+  `REGISTRATION_TIMEOUT_SECONDS` doesn't exist pre-fix at all, confirming
+  the test can't pass by accident -- not just that it passes now. Full
+  suite: 178 tests, up from 177, all green.
+
 ### 41. Stop /matches from broadcasting every match's request ids to every connection, not just the two people in it
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the
