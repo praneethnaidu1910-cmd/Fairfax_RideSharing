@@ -21,7 +21,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from app.privacy import to_public
+from app.privacy import to_list_item, to_public
 from app.router import create_request
 from app.schemas import Location, OneOffSchedule, RecurringSchedule, RideRequestCreate
 
@@ -121,7 +121,11 @@ async def submit_new_request(
 
 @router.get("/browse")
 def browse_requests(request: Request):
-    open_requests = [to_public(r) for r in request.app.state.store.list_open()]
+    # to_list_item(), not to_public() -- this page is exactly the
+    # "anonymous browser scrolling the open list" case RideRequestListItem's
+    # own docstring describes; the template never renders an id today, but
+    # the data this handler builds shouldn't carry one to begin with.
+    open_requests = [to_list_item(r) for r in request.app.state.store.list_open()]
     return templates.TemplateResponse(request, "browse.html", {"requests": open_requests})
 
 

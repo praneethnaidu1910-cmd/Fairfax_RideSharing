@@ -16,6 +16,7 @@ from app.schemas import (
     RecurringSchedule,
     RequestStatus,
     RideRequest,
+    RideRequestListItem,
     RideRequestPublic,
 )
 
@@ -57,9 +58,10 @@ def fuzz_schedule(
     )
 
 
-def to_public(request: RideRequest) -> RideRequestPublic:
-    """The coarse/fuzzed view of a request -- what GET /requests returns for
-    everyone. Never touches request.contact or the precise Location.
+def _coarse_fields(request: RideRequest) -> dict:
+    """Shared coarse/fuzzed fields behind both to_public() and
+    to_list_item() below -- never request.contact or the precise
+    Location.
 
     `status` is computed, not read straight off the stored request: an
     OPEN request whose one-off window has already passed (TASKS.md #14,
@@ -72,8 +74,7 @@ def to_public(request: RideRequest) -> RideRequestPublic:
     status = request.status
     if status == RequestStatus.OPEN and is_expired(request):
         status = RequestStatus.EXPIRED
-    return RideRequestPublic(
-        id=request.id,
+    return dict(
         rider_id=request.rider_id,
         origin_area=request.origin.coarse_cell(),
         destination_area=request.destination.coarse_cell(),
@@ -82,3 +83,26 @@ def to_public(request: RideRequest) -> RideRequestPublic:
         status=status,
         posted_at=request.posted_at,
     )
+
+
+def to_public(request: RideRequest) -> RideRequestPublic:
+    """The coarse/fuzzed view *plus* `id` -- only for a caller who already
+    supplied that id themselves (POST /requests' own response, POST
+    /requests/{id}/cancel's response, GET /requests/{id} where the id was
+    already in the URL). Never use this for a list an arbitrary caller
+    didn't ask for by id -- see to_list_item() and RideRequestListItem's
+    own docstring for exactly why that distinction is load-bearing, not
+    stylistic."""
+    return RideRequestPublic(id=request.id, **_coarse_fields(request))
+
+
+def to_list_item(request: RideRequest) -> RideRequestListItem:
+    """The coarse/fuzzed view *without* `id` -- what GET /requests and GET
+    /browse actually hand to an anonymous browser who never asked for this
+    particular request by id. See RideRequestListItem's own docstring:
+    handing out `id` here is exactly what used to let a caller scrape the
+    open list, watch two ids vanish together, and use that publicly-
+    scraped pair to pull a full post-match reveal through GET
+    /requests/{id}?viewer_request_id= -- no guessing, no websocket,
+    nothing but two already-public GET calls."""
+    return RideRequestListItem(**_coarse_fields(request))

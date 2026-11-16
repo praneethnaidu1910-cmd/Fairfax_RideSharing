@@ -288,12 +288,68 @@ class AbuseReport(BaseModel):
 
 
 class RideRequestPublic(BaseModel):
-    """GET /requests shape -- coarse location + fuzzed time only, never the
-    precise Location or `contact` (SCOPE.md: "no exact address, ever,
-    pre-match"). Built by app/privacy.py's to_public(), not a method here,
-    so this module doesn't need app.geo's fuzzing helpers."""
+    """Coarse location + fuzzed time only, never the precise Location or
+    `contact` (SCOPE.md: "no exact address, ever, pre-match"). Built by
+    app/privacy.py's to_public(), not a method here, so this module
+    doesn't need app.geo's fuzzing helpers.
+
+    Includes `id` -- safe only because every caller that gets this shape
+    already supplied that id themselves: `POST /requests`'s own response
+    (handing a brand-new id to its rightful owner for the first time),
+    `POST /requests/{id}/cancel`'s response, and `GET /requests/{id}`
+    (the id was already in the URL). See RideRequestListItem just below
+    for the shape that's actually safe to hand to someone who *doesn't*
+    already know the id.
+    """
 
     id: UUID
+    rider_id: str
+    origin_area: str
+    destination_area: str
+    schedule: Union[OneOffSchedule, RecurringSchedule]
+    seats_needed: int
+    status: RequestStatus
+    posted_at: datetime
+
+
+class RideRequestListItem(BaseModel):
+    """GET /requests and GET /browse's shape -- the open-requests list an
+    anonymous browser scrolls, same trust level as the WhatsApp group
+    today. Identical coarse/fuzzed fields to RideRequestPublic, with one
+    deliberate omission: no `id`.
+
+    `GET /requests/{id}?viewer_request_id=` (TASKS.md #7) treats knowing a
+    request's own id as the *only* proof needed to see that request's
+    precise origin/destination/contact once it's matched -- its own
+    docstring calls the id "unguessable... and never displayed to anyone
+    else." That was never actually true while `RideRequestPublic` (id
+    included) was also what the open list returned: every id was sitting
+    in plain sight in `GET /requests`' response body before a match even
+    happened, to literally anyone, no auth required (SCOPE.md: open-join,
+    no SMS/OTP). An uninvolved caller could scrape that list, wait for two
+    previously-listed ids to drop off it (a cheap, public signal that
+    those two just matched each other), and then call `GET
+    /requests/{a}?viewer_request_id={b}` using nothing but those two
+    publicly-scraped ids -- getting back a's full precise pickup/dropoff
+    and real contact info, exactly the thing SCOPE.md says gets
+    "exchanged only between two people after they mutually match -- never
+    broadcast," with no guessing needed at all. Confirmed real, not
+    theoretical, with a live script before writing this fix: posted two
+    compatible riders, recorded both ids straight off a real `GET
+    /requests` call made *before* they matched, confirmed both ids
+    vanished from that same list once they did, and then used that
+    scraped pair to pull a full reveal through `GET /requests/{id}
+    ?viewer_request_id=` as an otherwise completely uninvolved caller --
+    no websocket, no guessing, nothing but two already-public GET calls.
+    No caller of the open list legitimately needs the id back: the
+    poster already gets their own id for real from `POST /requests`'s own
+    response (never from this list), and the matched counterpart learns
+    the other id from the `/matches` WebSocket event itself (already
+    filtered to the two involved parties, not this list either) -- so
+    dropping `id` here closes the hole without taking anything away from
+    a real caller.
+    """
+
     rider_id: str
     origin_area: str
     destination_area: str

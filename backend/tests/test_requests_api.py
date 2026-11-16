@@ -222,13 +222,86 @@ def test_list_requests_never_includes_precise_location_or_contact():
     assert str(FAIRFAX[0]) not in response.text
     assert str(FAIRFAX[1]) not in response.text
 
-    listed = {entry["id"]: entry for entry in response.json()}
-    assert created["id"] in listed
-    entry = listed[created["id"]]
+    listed = {entry["rider_id"]: entry for entry in response.json()}
+    assert created["rider_id"] in listed
+    entry = listed[created["rider_id"]]
     assert "contact" not in entry
     assert "origin" not in entry
     assert "destination" not in entry
     assert entry["origin_area"] == created["origin_area"]
+
+
+def test_list_requests_never_includes_the_request_id_either():
+    # Not just contact/precise-location: `id` itself has to stay out of
+    # this list too. GET /requests/{id}?viewer_request_id= (TASKS.md #7)
+    # treats knowing a request's own id as the *only* proof needed to see
+    # its precise origin/destination/contact once matched -- that id is
+    # supposed to be a secret only the request's own poster has (handed
+    # back once, by POST /requests' own response) and that a matched
+    # counterpart only ever learns from the /matches WebSocket event
+    # naming them. An uninvolved caller with no relationship to a request
+    # at all could previously read its id straight off this open list
+    # before any match happened, then use that -- plus a second scraped id
+    # that vanished from this same list around the same time -- as a
+    # completely unguessed "viewer_request_id" once they matched each
+    # other. Confirmed real before this fix with a live script: two
+    # compatible riders' ids, read straight off a real GET /requests call
+    # made before they matched, were enough on their own (no other
+    # knowledge, no websocket) to pull a full reveal through GET
+    # /requests/{a}?viewer_request_id={b} once both vanished from this
+    # list. Regression coverage for the actual end-to-end scrape-then-
+    # reveal scenario lives in test_scraping_the_open_list_can_no_longer_
+    # reveal_a_matched_pair below; this test is the narrower "the field
+    # simply isn't there" check.
+    payload = _one_off_payload(
+        "rider-id-not-in-listing", FAIRFAX, ALDIE, 150, 30, contact="555-8887"
+    )
+
+    with TestClient(app) as client:
+        client.post("/requests", json=payload)
+        response = client.get("/requests")
+
+    assert response.status_code == 200
+    for entry in response.json():
+        assert "id" not in entry
+
+
+def test_scraping_the_open_list_before_a_match_can_no_longer_reveal_it_after():
+    # The real end-to-end attack GET /requests used to allow: an otherwise
+    # completely uninvolved caller scrapes every id off the public open
+    # list *before* any match happens (nothing here requires auth or
+    # guessing -- SCOPE.md is open-join, no SMS/OTP), notices two
+    # previously-listed ids vanish from the list together (a match), and
+    # uses that publicly-scraped pair as viewer_request_id against each
+    # other to pull a full reveal -- no websocket, no secret the attacker
+    # wasn't already handed for free. This has to fail now that `id` is
+    # gone from the open list's own response -- an attacker scraping this
+    # list has nothing at all to pair up, before or after a match happens.
+    payload_a = _one_off_payload(
+        "rider-scrape-a", FAIRFAX, ALDIE, 120, 30, contact="555-0601-secret"
+    )
+
+    with TestClient(app) as client:
+        a = client.post("/requests", json=payload_a).json()
+
+        # The attacker's own view of the world, scraped *before* any match
+        # -- the real window this bug was exploitable in. Real a["id"]
+        # above came from a's own POST response (a's own legitimate
+        # hand-off), not from anything an uninvolved scraper could read.
+        scraped_while_open = client.get("/requests").json()
+        scraped_ids = {entry.get("id") for entry in scraped_while_open}
+
+        payload_b = _one_off_payload(
+            "rider-scrape-b", NEAR_FAIRFAX, ALDIE, 125, 30, contact="555-0602-secret"
+        )
+        with client.websocket_connect("/matches") as websocket:
+            websocket.send_json({"request_id": a["id"]})
+            b = client.post("/requests", json=payload_b).json()
+            websocket.receive_json()  # block until the two are actually matched
+
+    assert scraped_ids == {None}
+    assert a["id"] not in scraped_ids
+    assert b["id"] not in scraped_ids
 
 
 def test_list_requests_fuzzes_the_departure_window_wider_than_posted():
@@ -351,7 +424,7 @@ def test_cancel_open_request_sets_cancelled_status_and_drops_it_from_the_open_li
     assert cancel_body["status"] == "cancelled"
     assert "contact" not in cancel_body
     assert detail.json()["status"] == "cancelled"
-    assert created["id"] not in {r["id"] for r in listing.json()}
+    assert created["rider_id"] not in {r["rider_id"] for r in listing.json()}
 
 
 def test_cancel_unknown_request_id_returns_404():
@@ -408,7 +481,7 @@ def test_open_request_past_its_window_reports_expired_status():
 
     assert created["status"] == "expired"
     assert detail.json()["status"] == "expired"
-    entry = {r["id"]: r for r in listing.json()}[created["id"]]
+    entry = {r["rider_id"]: r for r in listing.json()}[created["rider_id"]]
     assert entry["status"] == "expired"
 
 

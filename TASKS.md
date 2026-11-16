@@ -61,6 +61,68 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 43. Stop `GET /requests` from handing out the one id the post-match reveal treats as a secret
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found a bigger version of the
+  exact class of leak tasks 41/42 already closed on the WebSocket side --
+  this one's in the plain JSON `GET /requests` endpoint, no websocket
+  involved at all.
+- `GET /requests/{id}?viewer_request_id=` (task 7) treats knowing a
+  request's own id as the *only* proof needed to see its precise
+  pickup/dropoff and contact once matched -- its own docstring calls the
+  id "unguessable... and never displayed to anyone else." But
+  `RideRequestPublic` (the shape `to_public()` built, `id` included) was
+  also exactly what `GET /requests`' open list and `GET /browse` handed to
+  literally anyone, no auth required (SCOPE.md: open-join, no SMS/OTP) --
+  so every open request's id was sitting in plain sight before it was ever
+  matched. Confirmed this was real, not theoretical, with a live script
+  before writing any fix: posted two compatible riders, read both of their
+  ids straight off a real `GET /requests` call made *before* they matched
+  each other (nothing more than that one already-public GET), confirmed
+  both ids vanished from that same list once they did (a free, public
+  signal of who just matched whom), then called `GET
+  /requests/{a}?viewer_request_id={b}` using nothing but that scraped pair
+  -- and got back a `200` with a's full precise origin/destination and
+  real contact info, as a caller with zero relationship to either request.
+  Tasks 41/42 already closed this exact class of leak on the `/matches`
+  WebSocket (every match's ids broadcast to every connection); this was
+  the same leak's quieter, no-websocket-required sibling, reachable with
+  two plain `GET` calls from anyone at any time.
+- Fix: a new `RideRequestListItem` schema (`app/schemas.py`) -- the same
+  coarse/fuzzed fields `RideRequestPublic` already had, minus `id` -- and
+  a new `to_list_item()` (`app/privacy.py`, sharing the actual field-
+  building logic with `to_public()` via a new `_coarse_fields()` helper).
+  `GET /requests` (`app/router.py`) and `GET /browse` (`app/web.py`) now
+  both build this id-less shape instead of `RideRequestPublic`.
+  `RideRequestPublic` (id included) stays exactly as it was for the three
+  places that are actually safe to hand an id back: `POST /requests`'s own
+  response (the one legitimate, one-time hand-off of a brand-new id to its
+  rightful owner), `POST /requests/{id}/cancel`'s response, and `GET
+  /requests/{id}` (the id was already in the URL the caller used to get
+  there). No caller anywhere in this codebase needed the id *from* the
+  open list -- the poster already has their own from `POST /requests`, and
+  the matched counterpart learns the other id from the `/matches`
+  WebSocket event itself, already filtered to the two involved parties by
+  tasks 41/42's own fix, not from this list either -- so this closes the
+  hole without taking anything away from a real caller.
+- Tests: `tests/test_requests_api.py` adds
+  `test_list_requests_never_includes_the_request_id_either` (the plain
+  "the field isn't there" check) and
+  `test_scraping_the_open_list_before_a_match_can_no_longer_reveal_it_after`
+  (the real end-to-end reproduction above -- scrape the list before a
+  match, confirm nothing scraped can be used after). Also updated three
+  existing tests that happened to correlate `GET /requests`' entries by
+  `id` (now gone) to correlate by `rider_id` instead, since each already
+  used a unique one. `tests/test_privacy.py` adds
+  `test_to_list_item_never_includes_id_contact_or_precise_location`
+  directly against `to_list_item()`. Ran the two new `test_requests_api.py`
+  tests against the pre-fix code first (temporarily stashing
+  `app/privacy.py`/`app/router.py`/`app/schemas.py`/`app/web.py`) to
+  confirm they actually fail there -- a real scraped id that both matches
+  and successfully reveals the full record, not just that they pass now.
+  Full suite: 181 tests, up from 178, all green.
+
 ### 42. Close a `/matches` connection that never registers instead of leaking it (and its queue) forever
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

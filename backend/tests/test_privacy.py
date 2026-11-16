@@ -1,6 +1,6 @@
 from datetime import datetime, time, timedelta
 
-from app.privacy import FUZZ_PADDING, fuzz_schedule, to_public
+from app.privacy import FUZZ_PADDING, fuzz_schedule, to_list_item, to_public
 from app.schemas import Location, OneOffSchedule, RecurringSchedule, RequestStatus, RideRequest
 
 
@@ -94,3 +94,33 @@ def test_to_public_reports_expired_for_a_still_open_past_window_recurring_schedu
     public = to_public(request)
 
     assert public.status == RequestStatus.EXPIRED
+
+
+def test_to_list_item_never_includes_id_contact_or_precise_location():
+    # Regression: to_public() (id included) used to be what GET /requests'
+    # open list returned too -- handing every open request's id to any
+    # anonymous caller, no auth required, which is the one piece of
+    # information GET /requests/{id}?viewer_request_id= (TASKS.md #7)
+    # treats as a secret only a request's own poster/matched counterpart
+    # should ever have. to_list_item() is the shape that's actually safe
+    # to show someone who didn't ask for this request by id.
+    schedule = OneOffSchedule(
+        earliest_departure=datetime.utcnow() + timedelta(hours=1),
+        latest_departure=datetime.utcnow() + timedelta(hours=2),
+    )
+    request = RideRequest(
+        rider_id="rider-list-item",
+        origin=Location(lat=38.8462, lng=-77.3064),
+        destination=Location(lat=38.9757, lng=-77.6122),
+        schedule=schedule,
+        contact="555-0299",
+    )
+
+    item = to_list_item(request)
+    dumped = item.model_dump()
+
+    assert "id" not in dumped
+    assert "contact" not in dumped
+    assert "555-0299" not in item.model_dump_json()
+    assert "38.8462" not in item.model_dump_json()
+    assert dumped["rider_id"] == "rider-list-item"

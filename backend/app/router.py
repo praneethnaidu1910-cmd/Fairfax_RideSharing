@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from app.geocoding import PlaceNotFoundError, geocode_place
-from app.privacy import to_public
+from app.privacy import to_list_item, to_public
 from app.schemas import (
     AbuseReport,
     AbuseReportCreate,
@@ -22,6 +22,7 @@ from app.schemas import (
     RequestStatus,
     RideRequest,
     RideRequestCreate,
+    RideRequestListItem,
     RideRequestPublic,
 )
 
@@ -60,9 +61,17 @@ async def create_request(payload: RideRequestCreate, request: Request) -> RideRe
     return to_public(ride_request)
 
 
-@router.get("/requests", response_model=list[RideRequestPublic])
-def list_requests(request: Request) -> list[RideRequestPublic]:
-    return [to_public(r) for r in request.app.state.store.list_open()]
+@router.get("/requests", response_model=list[RideRequestListItem])
+def list_requests(request: Request) -> list[RideRequestListItem]:
+    """The open-requests list an anonymous browser scrolls -- deliberately
+    never includes `id` (see RideRequestListItem's own docstring: this
+    used to be a real, exploitable privacy hole, not a defense-in-depth
+    nicety -- an uninvolved caller could scrape every open request's id
+    straight off this endpoint, no auth required, then use two of them
+    to pull a full post-match reveal through GET /requests/{id}
+    ?viewer_request_id= once they vanished from this same list together).
+    """
+    return [to_list_item(r) for r in request.app.state.store.list_open()]
 
 
 @router.get("/requests/{request_id}")
