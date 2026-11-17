@@ -61,6 +61,53 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 45. Stop a malformed Nominatim result from 500ing `GET /geocode` instead of a clean 404
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found one in `app/geocoding.py`'s
+  `geocode_place()` -- its own handling of what Nominatim actually hands
+  back, not the rate limiter or request-shaping the last geocoding-related
+  entry (task 30) touched.
+- `geocode_place()`'s own docstring promises "raise PlaceNotFoundError --
+  never returns a guessed/default location," and `GET /geocode`
+  (`app/router.py`) only catches that one exception type, turning it into a
+  clean 404. But the final line builds `Location(lat=float(top["lat"]),
+  lng=float(top["lon"]))` straight from whatever Nominatim's JSON response
+  happened to contain, with nothing guarding either conversion. This
+  sandbox's network policy denies the real nominatim.openstreetmap.org
+  outright (this module's own docstring already notes that), so every test
+  here has always mocked the HTTP response -- which is exactly why a result
+  shaped unexpectedly (a non-numeric "lat"/"lon" string, or a coordinate
+  genuinely out of range) never got exercised: nothing about trusting
+  upstream JSON blindly is specific to being unable to reach the real
+  service, it's just the gap this sandbox's own test setup happened to
+  leave uncovered. Confirmed this was real, not theoretical, with a live
+  script before writing any fix: a mocked response of `{"lat": "999.0",
+  "lon": "-500.0"}` crashed `geocode_place()` with a bare
+  `pydantic_core.ValidationError` (out of `Location`'s own -90..90/-180..180
+  range checks), and `{"lat": "not-a-number", "lon": "-77.3"}` crashed it
+  with a bare `ValueError` from `float()` -- neither is a
+  `PlaceNotFoundError`, so both would reach a real caller of `GET /geocode`
+  as an unhandled 500, not the clear 404 this endpoint's own docstring
+  describes for exactly this situation ("never a guessed location").
+- Fix: the `Location(...)` construction is now wrapped in a `try`/`except
+  (KeyError, TypeError, ValueError)` (pydantic's `ValidationError` is itself
+  a `ValueError` subclass, so one clause catches both failure shapes) that
+  re-raises as `PlaceNotFoundError` -- the same exception, and the same
+  caller-facing contract, this function already uses for "Nominatim found
+  nothing." No change to `app/router.py`: it already catches
+  `PlaceNotFoundError` and turns it into a 404, so this closes the gap at
+  the one place that actually produces the bad data instead of teaching the
+  router a second exception type to catch.
+- Tests: `tests/test_geocoding.py` adds
+  `test_geocode_place_raises_clear_error_on_an_out_of_range_coordinate` and
+  `test_geocode_place_raises_clear_error_on_a_non_numeric_coordinate`, the
+  exact two reproductions above, each asserting `PlaceNotFoundError` instead
+  of a crash. Ran both against the pre-fix code first (temporarily stashing
+  just `app/geocoding.py`) to confirm they actually fail there -- a real
+  `ValidationError`/`ValueError` surfaced, not just that they pass now.
+  Full suite: 184 tests, up from 182, all green.
+
 ### 44. Stop an expired pool member from sitting in `self._unmatched` forever instead of actually leaving the pool
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

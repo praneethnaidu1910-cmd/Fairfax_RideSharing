@@ -77,6 +77,36 @@ def test_geocode_place_rejects_empty_input_without_calling_api(mock_get):
 
 @patch("app.geocoding._wait_for_rate_limit")
 @patch("app.geocoding.httpx.get")
+def test_geocode_place_raises_clear_error_on_an_out_of_range_coordinate(mock_get, mock_wait):
+    # Nominatim is a real third-party service this sandbox can't call for
+    # real (see this file's module docstring) -- so a malformed or garbage
+    # result is a real possibility this code has to handle itself, not
+    # something upstream validation can be trusted to rule out. Without a
+    # fix, Location(lat=999.0, ...)'s own ge/le validation raised a bare
+    # pydantic ValidationError straight out of geocode_place(), which
+    # app/router.py's GET /geocode only catches PlaceNotFoundError for --
+    # so this surfaced as an unhandled 500, not the "clear error, never a
+    # guessed location" this function's own docstring promises.
+    mock_get.return_value = _fake_response([{"lat": "999.0", "lon": "-500.0"}])
+
+    with pytest.raises(PlaceNotFoundError):
+        geocode_place("Somewhere")
+
+
+@patch("app.geocoding._wait_for_rate_limit")
+@patch("app.geocoding.httpx.get")
+def test_geocode_place_raises_clear_error_on_a_non_numeric_coordinate(mock_get, mock_wait):
+    # Same gap as the out-of-range case above, but hitting float()'s own
+    # ValueError instead of Location's validator -- a non-numeric "lat"/
+    # "lon" string from a malformed upstream result crashed the same way.
+    mock_get.return_value = _fake_response([{"lat": "not-a-number", "lon": "-77.3"}])
+
+    with pytest.raises(PlaceNotFoundError):
+        geocode_place("Somewhere else")
+
+
+@patch("app.geocoding._wait_for_rate_limit")
+@patch("app.geocoding.httpx.get")
 def test_geocode_place_propagates_http_errors_instead_of_a_silent_wrong_match(mock_get, mock_wait):
     response = MagicMock()
     response.raise_for_status.side_effect = httpx.HTTPStatusError(

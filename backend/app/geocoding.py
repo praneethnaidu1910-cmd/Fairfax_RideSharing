@@ -97,4 +97,9 @@ def geocode_place(place_name: str) -> Location:
         raise PlaceNotFoundError(f"no match for {place_name!r} in the Northern Virginia area")
 
     top = results[0]
-    return Location(lat=float(top["lat"]), lng=float(top["lon"]))
+    try:
+        return Location(lat=float(top["lat"]), lng=float(top["lon"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PlaceNotFoundError(
+            f"Nominatim returned an unusable result for {place_name!r}"
+        ) from exc
