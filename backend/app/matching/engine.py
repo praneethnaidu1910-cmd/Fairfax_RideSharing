@@ -189,6 +189,37 @@ class MatchingEngine:
         self._unmatched; otherwise `request` joins the pool for future
         calls to match against.
         """
+        # A pool member's one-off window can pass while it's just sitting in
+        # self._unmatched waiting for a candidate that never arrives -- the
+        # loop below already skips a candidate that's expired by the time
+        # it's scored (is_expired(candidate), next to the comment just
+        # below), but that only means it's never *matched*, not that it
+        # ever leaves the pool. Nothing else here ever drops it either:
+        # remove_from_pool() only runs on a cancel, and candidates_for()'s
+        # bucketing has no reason to ever visit a cell with nothing left
+        # nearby. Left alone, every expired request a real user ever
+        # posts-and-never-matches sits in this list for the rest of the
+        # process's life, making self._unmatched (and the bucketing index
+        # rebuilt from it on every single call) grow without bound for as
+        # long as the app actually runs -- exactly the kind of thing SCOPE.md's
+        # real, ~1,000-person deployment would hit daily, not a one-off edge
+        # case. Confirmed this was real, not theoretical, with a live script
+        # before writing this fix: pooled a one-off request whose window was
+        # about to pass (no candidate yet, so on_new_request() pooled it),
+        # waited for real wall-clock time to carry it past that window, then
+        # ran a second, unrelated request through on_new_request() -- the
+        # first request was still sitting in self._unmatched afterward,
+        # confirmed expired, with nothing anywhere having ever removed it.
+        # Fix: prune every expired member out of the pool at the start of
+        # every incremental call, before it's used for anything -- cheap
+        # (the pool only ever holds genuinely still-open, not-yet-expired
+        # requests as a result, so this stays bounded by real demand, not by
+        # how long the process has been running) and needs no separate
+        # cron/background sweep, consistent with TASKS.md #14's own "no
+        # cron job, compute it live" posture for expiry elsewhere.
+        if self._unmatched:
+            self._unmatched = [r for r in self._unmatched if not is_expired(r)]
+
         # Same expiry gate as match_batch(): an already-expired request
         # (TASKS.md #14) never joins the pool or wins a match, and an
         # existing pool member that's since expired while waiting is

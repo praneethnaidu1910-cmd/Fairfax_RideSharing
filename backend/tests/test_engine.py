@@ -287,6 +287,39 @@ def test_on_new_request_skips_a_candidate_that_expired_while_pooled():
     assert rider_1.status == RequestStatus.OPEN
 
 
+def test_on_new_request_purges_an_expired_pool_member_instead_of_leaving_it_forever():
+    # test_on_new_request_skips_a_candidate_that_expired_while_pooled just
+    # above proves an expired pool member never wins a match -- this proves
+    # the other half, which that test never checked: it doesn't just lose
+    # every future scoring round, it actually leaves the pool, instead of
+    # sitting in self._unmatched for the rest of the process's life. Before
+    # this fix, nothing anywhere ever pruned self._unmatched -- every
+    # one-off request a real user posts and never matches (routine, not
+    # rare, for SCOPE.md's actual ~1,000-person deployment) stayed there,
+    # unbounded, for as long as the process ran, making both the pool
+    # itself and the bucketing index rebuilt from it on every single call
+    # grow forever. Confirmed real, not theoretical, with a live script
+    # before writing this fix: pooled a request whose window was a second
+    # from passing, let real wall-clock time carry it past that window,
+    # then ran an unrelated request through on_new_request() -- the expired
+    # request was still sitting in self._unmatched afterward.
+    engine = MatchingEngine()
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    rider_1 = by_rider["rider-1"]
+    now = datetime.utcnow()
+    rider_1.schedule = OneOffSchedule(
+        earliest_departure=now - timedelta(hours=2), latest_departure=now - timedelta(hours=1)
+    )
+    engine._unmatched.append(rider_1)
+
+    # rider-9 (Falls Church -> Centerville) shares no corridor with rider-1
+    # (Fairfax -> Aldie) -- any unrelated arrival is enough to trigger the
+    # sweep, it doesn't need to be a real candidate for rider-1 at all.
+    engine.on_new_request(by_rider["rider-9"])
+
+    assert rider_1 not in engine._unmatched
+
+
 def test_remove_from_pool_drops_a_pooled_request_by_id():
     engine = MatchingEngine()
     by_rider = {r.rider_id: r for r in _sample_copy()}

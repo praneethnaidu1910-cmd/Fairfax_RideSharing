@@ -61,6 +61,52 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 44. Stop an expired pool member from sitting in `self._unmatched` forever instead of actually leaving the pool
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one in
+  `app/matching/engine.py`'s `on_new_request()` -- a resource leak this
+  time, not a validation gap or a privacy leak the way most of the last
+  dozen entries here were.
+- `on_new_request()` already skips a pool member whose one-off window has
+  passed by the time it's scored (`is_expired(candidate)`, right next to
+  this fix) -- but skipping it as a *candidate* was all that ever
+  happened. Nothing anywhere actually removes an expired request from
+  `self._unmatched`: `remove_from_pool()` only runs on a real cancel, and
+  `candidates_for()`'s H3 bucketing has no reason to ever revisit a cell
+  with nothing left nearby. Left alone, every one-off request a real rider
+  posts and never matches before its window passes -- which SCOPE.md's own
+  ~1,000-person deployment makes routine, not rare -- just sits in that
+  list for the rest of the process's life, and `build_indexes(self._unmatched)`
+  (called fresh on every single incremental call) rebuilds its H3 index
+  over that same, permanently-growing list every time. Confirmed this was
+  real, not theoretical, with a live script before writing any fix: pooled
+  a one-off request whose window was a second from passing (no candidate
+  yet, so `on_new_request()` pooled it normally), let real wall-clock time
+  carry it past that window, then ran a second, unrelated request through
+  `on_new_request()` -- the first request was still sitting in
+  `self._unmatched` afterward, confirmed expired, with nothing having ever
+  touched it.
+- Fix: `on_new_request()` now prunes every expired member out of
+  `self._unmatched` at the top of the call, before it's used for anything
+  -- a plain `is_expired()` filter, no new state, no separate cron/sweep
+  job needed, same "compute it live, no background job" posture TASKS.md
+  #14 already established for expiry elsewhere. The pool now only ever
+  holds genuinely still-open, not-yet-expired requests, so its size tracks
+  real outstanding demand instead of how long the process has been
+  running.
+- Tests: `tests/test_engine.py` adds
+  `test_on_new_request_purges_an_expired_pool_member_instead_of_leaving_it_forever`,
+  the exact reproduction above (a backdated pool member, a later unrelated
+  arrival, asserting the expired one is actually gone from
+  `self._unmatched` afterward) -- the existing
+  `test_on_new_request_skips_a_candidate_that_expired_while_pooled` already
+  proved an expired member can't *win*, but never checked whether it
+  *stayed*. Ran the new test against the pre-fix code first (temporarily
+  stashing just `app/matching/engine.py`) to confirm it actually fails
+  there -- it does, the expired request was still in the pool -- not just
+  that it passes now. Full suite: 182 tests, up from 181, all green.
+
 ### 43. Stop `GET /requests` from handing out the one id the post-match reveal treats as a secret
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the
