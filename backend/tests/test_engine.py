@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 import pytest
 
@@ -9,7 +9,7 @@ from app.db import make_session_factory
 from app.matching import engine as engine_module
 from app.matching.engine import DEFAULT_VEHICLE_CAPACITY, MatchingEngine
 from app.sample_data import SAMPLE_REQUESTS
-from app.schemas import Location, OneOffSchedule, RequestStatus, RideRequest
+from app.schemas import Location, OneOffSchedule, RecurringSchedule, RequestStatus, RideRequest
 from app.store import RequestStore
 
 
@@ -318,6 +318,70 @@ def test_on_new_request_purges_an_expired_pool_member_instead_of_leaving_it_fore
     engine.on_new_request(by_rider["rider-9"])
 
     assert rider_1 not in engine._unmatched
+
+
+def _full_car_recurring_request(rider_id: str, seats_needed: int) -> RideRequest:
+    # SCOPE.md's "a friend posting on behalf of a couple of others," taken
+    # to the vehicle's own limit -- a real, valid trip, not a malformed
+    # fixture. Recurring, not one-off, is the point: a RecurringSchedule
+    # never expires (scoring.is_expired() always returns False for one), so
+    # nothing's window-based ever removes it from the pool the way task 44's
+    # expiry prune does for a one-off.
+    return RideRequest(
+        rider_id=rider_id,
+        origin=Location(lat=38.8462, lng=-77.3064),
+        destination=Location(lat=38.9586, lng=-77.3570),
+        schedule=RecurringSchedule(
+            weekdays=[0, 1, 2, 3, 4],
+            earliest_departure_time=time(9, 0),
+            latest_departure_time=time(9, 30),
+        ),
+        seats_needed=seats_needed,
+        contact="555-0400",
+    )
+
+
+def test_on_new_request_does_not_pool_a_request_no_partner_could_ever_fit():
+    # capacity_fits() needs a.seats_needed + b.seats_needed <=
+    # vehicle_capacity, and the smallest possible b.seats_needed is 1
+    # (Field(ge=1)) -- so a request whose own seats_needed already equals
+    # DEFAULT_VEHICLE_CAPACITY can never satisfy that for *any* partner, no
+    # matter how compatible one would otherwise be. Confirmed real, not
+    # theoretical, with a live script before this fix: on_new_request()
+    # pooled exactly this request on arrival (no check at all for "could
+    # this ever match anyone"), then ran 50 unrelated, mutually-compatible
+    # requests through the same engine one at a time -- every one of those
+    # 50 paired off and left the pool normally, but this one was still
+    # sitting in self._unmatched afterward, with nothing anywhere having
+    # ever touched it, and nothing ever would: a RecurringSchedule never
+    # expires, so task 44's own expiry prune doesn't reach it either.
+    engine = MatchingEngine()
+    full_car = _full_car_recurring_request("rider-full-car", DEFAULT_VEHICLE_CAPACITY)
+
+    matches = engine.on_new_request(full_car)
+
+    assert matches == []
+    assert full_car not in engine._unmatched
+    assert full_car.status == RequestStatus.OPEN  # still a real, open, visible request
+
+
+def test_on_new_request_purges_a_capacity_impossible_pool_member_instead_of_leaving_it_forever():
+    # The other half of the fix above, same shape as
+    # test_on_new_request_purges_an_expired_pool_member_instead_of_leaving_it_forever:
+    # a member that's already sitting in the pool (e.g. one pooled before
+    # this fix existed) gets swept out by the same prune that now runs at
+    # the top of every incremental call, not just kept out of the pool on
+    # its own way in.
+    engine = MatchingEngine()
+    full_car = _full_car_recurring_request("rider-full-car-already-pooled", DEFAULT_VEHICLE_CAPACITY)
+    engine._unmatched.append(full_car)
+
+    by_rider = {r.rider_id: r for r in _sample_copy()}
+    # Any unrelated arrival is enough to trigger the sweep -- it doesn't
+    # need to be a real candidate for full_car at all.
+    engine.on_new_request(by_rider["rider-9"])
+
+    assert full_car not in engine._unmatched
 
 
 def test_remove_from_pool_drops_a_pooled_request_by_id():

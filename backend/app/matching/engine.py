@@ -20,6 +20,7 @@ from uuid import UUID
 
 from app.matching.bucketing import build_indexes, candidate_groups, candidates_for
 from app.matching.scoring import (
+    can_ever_be_matched,
     capacity_fits,
     compatibility_score,
     directional_score,
@@ -217,8 +218,37 @@ class MatchingEngine:
         # how long the process has been running) and needs no separate
         # cron/background sweep, consistent with TASKS.md #14's own "no
         # cron job, compute it live" posture for expiry elsewhere.
+        #
+        # Same unbounded-pool shape, different trigger: a request whose own
+        # seats_needed already leaves no room for even the smallest possible
+        # partner (can_ever_be_matched(), app/matching/scoring.py) can never
+        # win a match no matter how long it waits or who else shows up --
+        # capacity_fits() depends only on the two seat counts, never on
+        # location/time, so nothing about a future arrival changes the
+        # answer. Unlike an expired one-off request, this one has no window
+        # to pass either: a RecurringSchedule never expires
+        # (scoring.is_expired() always returns False for one), so without
+        # this check a party that fills the whole vehicle alone -- SCOPE.md's
+        # own "a friend posting on behalf of a couple of others," just taken
+        # to DEFAULT_VEHICLE_CAPACITY's own limit -- would sit in
+        # self._unmatched for the rest of the process's life the moment it's
+        # posted as a recurring request, growing the pool (and the bucketing
+        # index rebuilt from it on every single call) by one permanently
+        # stuck entry per such request, for as long as the app runs.
+        # Confirmed real, not theoretical, with a live script before this
+        # fix: posted one recurring request with seats_needed ==
+        # DEFAULT_VEHICLE_CAPACITY (4), then ran 50 unrelated,
+        # mutually-compatible requests through on_new_request() one at a
+        # time -- every one of those 50 paired off and left the pool
+        # normally, but the seats_needed=4 request was still sitting in
+        # self._unmatched afterward, with nothing anywhere having ever
+        # touched it.
         if self._unmatched:
-            self._unmatched = [r for r in self._unmatched if not is_expired(r)]
+            self._unmatched = [
+                r
+                for r in self._unmatched
+                if not is_expired(r) and can_ever_be_matched(r, self.vehicle_capacity)
+            ]
 
         # Same expiry gate as match_batch(): an already-expired request
         # (TASKS.md #14) never joins the pool or wins a match, and an
@@ -255,7 +285,14 @@ class MatchingEngine:
                         best_window_new, best_window_existing = window_a, window_b
 
         if best_candidate is None:
-            self._unmatched.append(request)
+            # Don't pool a request that can never be matched by anyone,
+            # however small (can_ever_be_matched(), same reasoning as the
+            # prune step above) -- it would otherwise sit here forever for
+            # exactly the reason that prune step exists to fix, just
+            # starting from the very first call that ever sees it instead
+            # of a later one.
+            if can_ever_be_matched(request, self.vehicle_capacity):
+                self._unmatched.append(request)
             return []
 
         # best_candidate came from the self._unmatched pool read above, but

@@ -61,6 +61,78 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 47. Stop a request no partner could ever fit from sitting in the matching pool forever
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found the same unbounded-pool
+  shape task 44 already fixed once, just with a different trigger that
+  task 44's own fix doesn't reach.
+- Task 44 fixed `on_new_request()` leaving an *expired* pool member in
+  `self._unmatched` forever. But `capacity_fits()` only depends on the two
+  requests' `seats_needed` -- never location or time -- and the smallest
+  possible partner is `seats_needed=1` (`app/schemas.py`'s `Field(ge=1)`).
+  That means a request whose own `seats_needed` already equals or exceeds
+  `DEFAULT_VEHICLE_CAPACITY` (4) can never satisfy `capacity_fits()` with
+  *any* partner, no matter how perfect every other dimension is or how
+  long it waits -- a real, reachable case, not a contrived one: SCOPE.md's
+  own "a friend posting on behalf of a couple of others" example, taken to
+  the vehicle's own limit, is exactly a party that fills the whole car
+  alone. Nothing anywhere ever checked "could this request even in
+  principle match somebody" before pooling it, so it got pooled on arrival
+  like any other unmatched request -- and if it's a `RecurringSchedule`
+  (SCOPE.md: "recurring requests are first-class," e.g. "daily commute for
+  me and 3 friends"), task 44's own expiry prune can't reach it either,
+  since `scoring.is_expired()` always returns `False` for a recurring
+  schedule -- there's no window to pass. Confirmed this was real, not
+  theoretical, with a live script before writing any fix: posted one
+  recurring request with `seats_needed == DEFAULT_VEHICLE_CAPACITY`, then
+  ran 50 unrelated, mutually-compatible requests through the same engine
+  one at a time -- every one of those 50 paired off and left the pool
+  normally, but the `seats_needed=4` request was still sitting in
+  `self._unmatched` afterward, confirmed never touched, and nothing
+  anywhere would ever touch it: unlike an expired one-off request, this
+  one has no window to wait out, so it's not a temporary wait, it's
+  permanent for as long as the process runs -- one more entry added to
+  `self._unmatched` (and the bucketing index rebuilt from it on every
+  single incremental call) per such request, forever, for exactly the
+  real ~1,000-person deployment SCOPE.md describes.
+- Fix: a new `can_ever_be_matched()` (`app/matching/scoring.py`, next to
+  `capacity_fits()` it depends on) checks a request's own `seats_needed`
+  against the smallest theoretically possible partner
+  (`MIN_PARTNER_SEATS = 1`) -- not against whichever candidates happen to
+  be bucketed nearby right now, since `capacity_fits()` never depends on
+  location/time anyway, so "fails against the smallest possible partner"
+  really does mean "fails against every possible partner, permanently."
+  `on_new_request()` now uses it in two places, mirroring task 44's own
+  two-sided fix exactly: the top-of-call prune that already drops expired
+  members now also drops capacity-impossible ones, and the "no candidate
+  found, so pool it" branch no longer pools a request that could never be
+  matched in the first place -- it still returns `[]` (still a real, open,
+  visible request via `GET /requests`/`/mine/{id}`, exactly as before),
+  it's just never added to the *internal* pool, which is invisible to
+  every public response anyway. Deliberately narrow: this changes nothing
+  about matching outcomes (such a request could never have won a match
+  regardless, by `capacity_fits()`'s own symmetric logic -- it fails
+  against this request from the *other* side too, so it was never a
+  realizable candidate for anyone else either), only what the pool holds
+  onto uselessly.
+- Tests: `tests/test_scoring.py` adds
+  `test_can_ever_be_matched_true_exactly_when_the_smallest_possible_partner_fits`
+  (the boundary itself: true for seats_needed 1-3, false for 4-5, against
+  `vehicle_capacity=4`). `tests/test_engine.py` adds
+  `test_on_new_request_does_not_pool_a_request_no_partner_could_ever_fit`
+  (the exact reproduction above, via `on_new_request()` directly) and
+  `test_on_new_request_purges_a_capacity_impossible_pool_member_instead_of_leaving_it_forever`
+  (same shape as task 44's own pool-purge test -- a member already sitting
+  in the pool gets swept by the same prune, not just kept out on its own
+  way in). Ran both new `test_engine.py` tests against the pre-fix code
+  first (temporarily stashing `app/matching/engine.py`/`scoring.py`) to
+  confirm they actually fail there -- the request was still sitting in
+  `self._unmatched` in both cases, not just that they pass now; the new
+  `test_scoring.py` test fails to even import pre-fix, since
+  `can_ever_be_matched` doesn't exist yet. Full suite: 191 tests, up from
+  188, all green.
+
 ### 46. Stop a non-numeric `seats_needed`/`weekdays` on the `/new` form from 422ing with raw JSON instead of the form's own error page
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

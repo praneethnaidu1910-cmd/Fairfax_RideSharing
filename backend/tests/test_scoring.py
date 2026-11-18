@@ -1,6 +1,7 @@
 from datetime import datetime, time, timedelta
 
 from app.matching.scoring import (
+    can_ever_be_matched,
     capacity_fits,
     compatibility_score,
     directional_score,
@@ -93,6 +94,23 @@ def test_temporal_score_two_normal_windows_merely_touching_still_scores_zero():
 def test_capacity_fits_hard_constraint():
     assert capacity_fits(RIDER_1, RIDER_7, vehicle_capacity=4)  # 1 + 1 seats
     assert not capacity_fits(RIDER_1, RIDER_7, vehicle_capacity=1)
+
+
+def test_can_ever_be_matched_true_exactly_when_the_smallest_possible_partner_fits():
+    # capacity_fits() needs a.seats_needed + b.seats_needed <=
+    # vehicle_capacity, and the smallest possible partner is seats_needed=1
+    # (app/schemas.py's Field(ge=1)) -- so can_ever_be_matched() should
+    # track exactly whether *that* partner would fit, not some other
+    # threshold. Confirmed with a live check before writing the function:
+    # capacity_fits() against a real seats_needed=1 partner at
+    # vehicle_capacity=4 is True for seats_needed in {1, 2, 3} and False
+    # for {4, 5} -- the exact boundary this asserts.
+    for seats_needed in (1, 2, 3):
+        request = RIDER_1.model_copy(update={"seats_needed": seats_needed})
+        assert can_ever_be_matched(request, vehicle_capacity=4) is True
+    for seats_needed in (4, 5):
+        request = RIDER_1.model_copy(update={"seats_needed": seats_needed})
+        assert can_ever_be_matched(request, vehicle_capacity=4) is False
 
 
 def test_known_good_pair_scores_higher_than_known_bad_pair():

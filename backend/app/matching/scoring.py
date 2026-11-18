@@ -101,6 +101,33 @@ def capacity_fits(a: RideRequest, b: RideRequest, vehicle_capacity: int) -> bool
     return a.seats_needed + b.seats_needed <= vehicle_capacity
 
 
+# The smallest party any other request could ever contribute -- app/schemas.py's
+# seats_needed has Field(ge=1), so 1 is the smallest valid partner that could
+# ever exist. Used by can_ever_be_matched() below to decide whether a request
+# is ruled out by capacity alone, against every possible partner, not just
+# the ones actually bucketed near it right now.
+MIN_PARTNER_SEATS = 1
+
+
+def can_ever_be_matched(request: RideRequest, vehicle_capacity: int) -> bool:
+    """Whether some partner, of any size down to MIN_PARTNER_SEATS, could
+    ever satisfy capacity_fits() with `request` -- i.e. whether pooling it
+    to wait for one is ever worth doing at all.
+
+    A request whose own seats_needed already leaves no room for even the
+    smallest possible partner (e.g. a party that already fills the whole
+    vehicle, docs/MATCHING_ALGORITHM.md's "pairs only" engine has no third
+    seat to offer it) isn't a bug by itself -- SCOPE.md's "a friend posting
+    on behalf of a couple of others" is a perfectly real trip that just
+    happens to have no room left for a stranger. But nothing about that
+    makes it match *later*, either: capacity_fits() depends only on the
+    two seat counts, never on location/time, so if it fails against the
+    smallest theoretically possible partner today, no future arrival
+    (closer, more compatible, whenever it shows up) changes that.
+    """
+    return request.seats_needed + MIN_PARTNER_SEATS <= vehicle_capacity
+
+
 def explain_match(
     a: RideRequest, b: RideRequest, window_a: OneOffSchedule, window_b: OneOffSchedule
 ) -> str:
