@@ -47,10 +47,28 @@ async def submit_new_request(
     schedule_type: str = Form(...),
     earliest_departure: Optional[str] = Form(None),
     latest_departure: Optional[str] = Form(None),
-    weekdays: list[int] = Form([]),
+    # Both of these used to be typed `list[int]`/`int` straight on the Form
+    # parameter -- which meant FastAPI/pydantic coerced them to int *before*
+    # this function (and its own try/except below) ever ran at all. A
+    # malformed value (a non-numeric weekday, or non-numeric seats_needed)
+    # never reached this function's own error handling; it 422'd with
+    # FastAPI's raw JSON error body instead of this endpoint's own
+    # "Couldn't post that request: ..." HTML re-render every *other*
+    # malformed field on this exact form gets (bad place name, bad
+    # schedule, empty rider_id/contact). Confirmed real, not theoretical,
+    # with a live TestClient call before this fix: POST /new with
+    # seats_needed="abc" (a rider mistyping the seats field, or any
+    # non-browser client) returned a bare `{"detail":[{"type":
+    # "int_parsing",...}]}` JSON body, not the form page -- and the exact
+    # same thing happened for weekdays=["abc"]. Taking them in as plain
+    # strings and parsing them inside the try block below, same pattern as
+    # origin_lat/origin_lng's own float() calls just beneath it, routes a
+    # bad value through the one error path this endpoint already has
+    # instead of a second, inconsistent one FastAPI provides for free.
+    weekdays: list[str] = Form([]),
     earliest_departure_time: Optional[str] = Form(None),
     latest_departure_time: Optional[str] = Form(None),
-    seats_needed: int = Form(1),
+    seats_needed: str = Form("1"),
     contact: str = Form(...),
 ):
     # Re-render with whatever the rider typed on any failure below, so a
@@ -89,9 +107,16 @@ async def submit_new_request(
         )
 
     try:
+        # Blank seats_needed (a cleared number field) keeps the same
+        # "default to 1" behavior the old `int = Form(1)` typing gave it
+        # for free; anything present but non-numeric is a real mistake that
+        # belongs in the error below, same as a bad weekday value.
+        parsed_seats_needed = int(seats_needed) if seats_needed.strip() else 1
+        parsed_weekdays = [int(day) for day in weekdays]
+
         if schedule_type == "recurring":
             schedule = RecurringSchedule(
-                weekdays=weekdays,
+                weekdays=parsed_weekdays,
                 earliest_departure_time=earliest_departure_time,
                 latest_departure_time=latest_departure_time,
             )
@@ -106,7 +131,7 @@ async def submit_new_request(
             origin=Location(lat=float(origin_lat), lng=float(origin_lng)),
             destination=Location(lat=float(destination_lat), lng=float(destination_lng)),
             schedule=schedule,
-            seats_needed=seats_needed,
+            seats_needed=parsed_seats_needed,
             contact=contact,
         )
     except (ValidationError, ValueError, TypeError) as exc:

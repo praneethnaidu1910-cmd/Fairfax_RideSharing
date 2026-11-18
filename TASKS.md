@@ -61,6 +61,69 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 46. Stop a non-numeric `seats_needed`/`weekdays` on the `/new` form from 422ing with raw JSON instead of the form's own error page
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one in `app/web.py`'s
+  `submit_new_request()` -- a gap in this form's own error handling, not in
+  the matching engine/race-condition territory most of the last several
+  entries lived in.
+- Every other bad value this form can receive -- a place name that doesn't
+  geocode, a bad schedule, an empty `rider_id`/`contact` -- gets caught by
+  this function's own `try`/`except` and re-rendered as the same form page
+  with a clear "Couldn't post that request: ..." message and whatever the
+  rider already typed still filled in, per this function's own comment
+  ("so a mistake doesn't mean starting the form over from scratch"). But
+  `seats_needed` was typed `int = Form(1)` and `weekdays` was typed
+  `list[int] = Form([])` directly on the route signature -- which means
+  FastAPI/pydantic coerces them to `int` *before* `submit_new_request()`
+  ever runs at all, so a bad value in either one never reaches this
+  function's own error handling, or its own form page, no matter what.
+  Confirmed this was real, not theoretical, with a live `TestClient` call
+  before writing any fix: `POST /new` with `seats_needed="abc"` (a rider
+  mistyping the seats field, or any non-browser client) returned a bare
+  `{"detail":[{"type":"int_parsing","loc":["body","seats_needed"],...}]}`
+  JSON body, not this form's own page -- and `weekdays=["abc"]` on a
+  recurring submission 422'd the exact same way. A browser's own
+  `type="number"`/fixed checkbox values mostly keep a normal user from
+  typing this by hand, but nothing about this form is only reachable from
+  a browser (SCOPE.md never says the API is browser-only, and this is the
+  same kind of "nothing stops a non-browser client" gap several of the
+  last several entries here have found elsewhere), and even a browser can
+  be made to submit a garbage value through devtools or a browser
+  extension without the server ever noticing the difference.
+- Fix: both fields now come in as plain strings (`seats_needed: str =
+  Form("1")`, `weekdays: list[str] = Form([])`) and get parsed inside the
+  existing `try` block, same pattern as `origin_lat`/`origin_lng`'s own
+  `float()` calls right next to them -- a parse failure now raises the
+  same `ValueError` the existing `except (ValidationError, ValueError,
+  TypeError)` already catches, routing it through the one error path this
+  endpoint already has instead of a second, inconsistent one FastAPI
+  provides for free. A blank `seats_needed` (a genuinely cleared number
+  field, not a mistyped one) still defaults to `1`, the same behavior the
+  old `int = Form(1)` typing gave it for free -- this fix closes the
+  "non-numeric input 422s with the wrong error" gap without changing what
+  a blank field does. `new_request.html`'s weekday-checkbox re-check
+  (`day in form.weekdays`) had to change to `day|string in form.weekdays`
+  to match `weekdays`'s new string-typed form state -- otherwise a
+  recurring submission that failed for an unrelated reason (e.g. a bad
+  geocode) would silently lose its previously-checked weekday boxes on
+  the re-rendered form, even though the actual fix above was unrelated to
+  that behavior.
+- Tests: `tests/test_web_frontend.py` adds
+  `test_non_numeric_seats_needed_reprompts_form_instead_of_a_raw_422` and
+  `test_non_numeric_weekday_reprompts_form_instead_of_a_raw_422` (the exact
+  two reproductions above, each asserting a `400` HTML re-render instead
+  of a `422` JSON body), `test_blank_seats_needed_still_defaults_to_one`
+  (proving the blank-field behavior didn't regress), and
+  `test_recurring_form_recheck_shows_the_right_weekday_boxes_after_an_unrelated_error`
+  (the checkbox-recheck fix, triggered by an unrelated bad-geocode error).
+  Ran the two reproduction tests against the pre-fix code first (temporarily
+  stashing `app/web.py`/`new_request.html`) to confirm they actually fail
+  there -- a real `422` with FastAPI's raw JSON body, not the `400` HTML
+  page, on both -- not just that they pass now. Full suite: 188 tests, up
+  from 184, all green.
+
 ### 45. Stop a malformed Nominatim result from 500ing `GET /geocode` instead of a clean 404
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

@@ -47,7 +47,7 @@
     {% for day in range(7) %}
     <label style="display:inline-block; font-weight: normal; margin-right: 0.75rem;">
       <input type="checkbox" name="weekdays" value="{{ day }}"
-             {% if form and day in form.weekdays %}checked{% endif %}> {{ day_names[day] }}
+             {% if form and day|string in form.weekdays %}checked{% endif %}> {{ day_names[day] }}
     </label>
     {% endfor %}
     <label for="earliest_departure_time">Earliest departure time</label>
