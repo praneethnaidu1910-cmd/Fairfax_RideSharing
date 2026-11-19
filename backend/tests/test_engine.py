@@ -1,16 +1,27 @@
 import asyncio
 import contextlib
 import threading
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
 from app.db import make_session_factory
 from app.matching import engine as engine_module
+from app.matching import scoring as scoring_module
 from app.matching.engine import DEFAULT_VEHICLE_CAPACITY, MatchingEngine
 from app.sample_data import SAMPLE_REQUESTS
 from app.schemas import Location, OneOffSchedule, RecurringSchedule, RequestStatus, RideRequest
 from app.store import RequestStore
+
+
+class _FixedDate(date):
+    """A real Thursday, pinned so
+    test_on_new_request_matches_a_recurring_rider_against_next_weeks_one_off_occurrence
+    doesn't depend on which real day the suite happens to run on."""
+
+    @classmethod
+    def today(cls) -> date:
+        return cls(2026, 11, 19)
 
 
 def _sample_copy() -> list[RideRequest]:
@@ -481,6 +492,59 @@ def test_on_new_request_matches_across_two_sequential_arrivals():
     assert by_rider["rider-1"].status == RequestStatus.MATCHED
     assert by_rider["rider-7"].status == RequestStatus.MATCHED
     assert engine._unmatched == []
+
+
+def test_on_new_request_matches_a_recurring_rider_against_next_weeks_one_off_occurrence(
+    monkeypatch,
+):
+    # app/matching/scoring.py's expand_schedule() used to anchor every
+    # weekday to the Monday-Sunday week *containing* "today," not that
+    # weekday's next real occurrence -- silently landing on a date in the
+    # past for any weekday earlier in the week than today. Confirmed real,
+    # not theoretical, with a live script before that fix: from a real
+    # Thursday, a recurring rider posting "every Monday, 9:00-9:30" and a
+    # one-off rider posting the very next Monday, 9:05-9:20 -- same
+    # origin/destination, a textbook match on every other dimension --
+    # never matched, because the recurring side expanded to the Monday 3
+    # days *before* reference_date while the one-off side had the real
+    # upcoming Monday, so temporal_score() saw two different calendar dates
+    # and scored 0.0 overlap. Pin "today" to that same Thursday here so
+    # this doesn't depend on which real day the suite happens to run on.
+    monkeypatch.setattr(scoring_module, "date", _FixedDate)
+
+    origin = Location(lat=38.8462, lng=-77.3064)
+    destination = Location(lat=38.9757, lng=-77.6122)
+    recurring_rider = RideRequest(
+        rider_id="recurring-commuter",
+        origin=origin,
+        destination=destination,
+        schedule=RecurringSchedule(
+            weekdays=[0], earliest_departure_time=time(9, 0), latest_departure_time=time(9, 30)
+        ),
+        contact="555-0301",
+    )
+    upcoming_monday = _FixedDate.today() + timedelta(
+        days=(0 - _FixedDate.today().weekday()) % 7
+    )
+    one_off_rider = RideRequest(
+        rider_id="one-off-rider",
+        origin=origin,
+        destination=destination,
+        schedule=OneOffSchedule(
+            earliest_departure=datetime.combine(upcoming_monday, time(9, 5)),
+            latest_departure=datetime.combine(upcoming_monday, time(9, 20)),
+        ),
+        contact="555-0302",
+    )
+
+    engine = MatchingEngine()
+    assert engine.on_new_request(recurring_rider) == []
+    matches = engine.on_new_request(one_off_rider)
+
+    assert len(matches) == 1
+    assert set(matches[0].request_ids) == {recurring_rider.id, one_off_rider.id}
+    assert recurring_rider.status == RequestStatus.MATCHED
+    assert one_off_rider.status == RequestStatus.MATCHED
 
 
 @pytest.mark.asyncio

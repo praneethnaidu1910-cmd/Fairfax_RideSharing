@@ -61,6 +61,72 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 48. Fix expand_schedule() anchoring a recurring weekday to the past instead of its next real occurrence
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug
+  the same way the last several runs did, and found one in
+  `app/matching/scoring.py`'s `expand_schedule()` -- a date-math bug in how
+  a `RecurringSchedule` gets turned into concrete windows for scoring, not
+  a validation gap or a leak the way most of the recent entries here were.
+- `expand_schedule()` turned each weekday in `schedule.weekdays` into a
+  date inside the Monday-Sunday week *containing* `reference_date` (today,
+  by default) -- not that weekday's actual next occurrence. For any
+  weekday earlier in the week than today, that's a date in the past: from
+  a real Thursday, `weekdays=[0]` (Monday) expanded to the Monday *3 days
+  before* today, not the upcoming one. That's invisible comparing two
+  `RecurringSchedule`s against each other (both expand with the same
+  default `reference_date`, so they agree on the same wrong date for a
+  shared weekday, and the overlap check never notices). But a
+  `RecurringSchedule` scored against a `OneOffSchedule` compares real
+  calendar dates, and a one-off rider's date is whatever actual future day
+  they typed -- unrelated to "today's own week." SCOPE.md's whole point
+  for recurring requests is a standing commute matching against whoever
+  else is going that way, one-off riders very much included, so this
+  wasn't a corner case. Confirmed real, not theoretical, with a live
+  script before writing any fix: from a real Thursday, a recurring rider
+  posting "every Monday, 9:00-9:30" and a one-off rider posting the very
+  next Monday, 9:05-9:20, same origin/destination -- a textbook
+  same-corridor, overlapping-window match on every other dimension --
+  never matched through the real engine: the recurring side expanded to a
+  Monday 3 days in the past, the one-off side had the real upcoming
+  Monday, `temporal_score()` saw two different calendar dates and scored
+  0.0 overlap, and both requests sat in `on_new_request()`'s pool
+  unmatched afterward.
+- Fix: `expand_schedule()` now walks forward from `reference_date` to each
+  weekday's next occurrence on or after it (`days_ahead = (weekday -
+  reference_date.weekday()) % 7`), instead of locating that weekday inside
+  `reference_date`'s own Monday-Sunday week. Still anchors every weekday to
+  the same `reference_date` for any pair of schedules expanded in the same
+  scoring pass, so `RecurringSchedule`-vs-`RecurringSchedule` stays exactly
+  as comparable as before (both still land on the same date for a shared
+  weekday) -- it just never produces a date earlier than `reference_date`
+  itself anymore, which is what makes it line up correctly against a real
+  `OneOffSchedule` date too. Deliberately narrow: doesn't touch the
+  separate, already-flagged "does today's occurrence expire once its own
+  time passes" question (docs/MATCHING_ALGORITHM.md's "Request lifecycle"
+  section already calls that a real redesign, not attempted here) -- this
+  is purely about which calendar date each weekday maps to, not when a
+  recurring request should stop being matchable.
+- Tests: `tests/test_scoring.py` adds
+  `test_expand_schedule_recurring_never_lands_on_a_date_before_reference_date`
+  (the exact Thursday/Monday reproduction above, pinned to a fixed date so
+  it doesn't depend on which real day the suite runs),
+  `test_expand_schedule_recurring_keeps_todays_own_weekday_on_reference_date`
+  (today's own weekday still expands to today, unaffected), and
+  `test_expand_schedule_recurring_multiple_weekdays_still_span_less_than_a_week`
+  (the existing "all instances within one week of each other" invariant
+  still holds under the new next-occurrence math). `tests/test_engine.py`
+  adds
+  `test_on_new_request_matches_a_recurring_rider_against_next_weeks_one_off_occurrence`,
+  the real end-to-end reproduction above through the actual engine, with
+  "today" pinned via monkeypatching `app.matching.scoring.date` to the
+  same real Thursday. Ran all four against the pre-fix code first
+  (temporarily stashing just `app/matching/scoring.py`) to confirm they
+  actually fail there -- the engine test came back with zero matches, not
+  one, and two of the three `expand_schedule()` unit tests failed on the
+  wrong date, not just that they pass now. Full suite: 195 tests, up from
+  191, all green.
+
 ### 47. Stop a request no partner could ever fit from sitting in the matching pool forever
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

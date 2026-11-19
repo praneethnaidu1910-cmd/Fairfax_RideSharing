@@ -189,22 +189,52 @@ def expand_schedule(
     schedule: Union[OneOffSchedule, RecurringSchedule],
     reference_date: Optional[date] = None,
 ) -> list[OneOffSchedule]:
-    """Concrete one-off windows for one calendar week.
+    """Concrete one-off windows, one per weekday in schedule.weekdays, each
+    anchored to that weekday's *next* occurrence on or after reference_date
+    (today, by default) -- e.g. weekdays=[0, 1, 2, 3, 4] becomes 5
+    instances.
 
     A OneOffSchedule expands to itself (single-element list) -- already a
-    one-off window, nothing to do. A RecurringSchedule expands to one
-    OneOffSchedule per weekday in schedule.weekdays, all in the
-    Monday-Sunday week containing reference_date (today, by default) --
-    e.g. weekdays=[0, 1, 2, 3, 4] becomes 5 instances.
+    one-off window, nothing to do.
+
+    This used to anchor every weekday to the Monday-Sunday week
+    *containing* reference_date, not its next occurrence -- which silently
+    produced a date in the past for any weekday earlier in the week than
+    reference_date itself (e.g. weekdays=[0] (Monday), expanded on a
+    Thursday, used to land on the Monday 3 days *before* reference_date,
+    not the upcoming one). That's invisible when comparing two
+    RecurringSchedules against each other (both expand with the same
+    default reference_date, so both land on the same, equally-wrong date
+    for a shared weekday -- the overlap check still agrees with itself).
+    But a RecurringSchedule scored against a OneOffSchedule compares actual
+    calendar dates, not just times-of-day, and a one-off rider's date is
+    whatever real future date they actually typed -- unrelated to
+    "reference_date's own week." Confirmed real, not theoretical, with a
+    live script before this fix: a recurring rider posting "every Monday,
+    9:00-9:30" from a real Thursday, and a one-off rider posting the very
+    next Monday, 9:05-9:20, same origin/destination -- a textbook
+    same-day, overlapping-window match on every other dimension --
+    expanded to a Monday 3 days in the past for the recurring side and the
+    real upcoming Monday for the one-off side, so temporal_score() saw two
+    windows on different calendar dates and scored 0.0 overlap; both sat
+    in on_new_request()'s pool unmatched. Fix: walk forward from
+    reference_date to the next date whose weekday matches, per weekday,
+    instead of locating each weekday inside reference_date's own
+    Monday-Sunday week -- still anchors every weekday to the same
+    reference_date for any pair of schedules expanded in the same scoring
+    pass (so RecurringSchedule-vs-RecurringSchedule stays exactly as
+    comparable as before), but now also lines up correctly against a
+    OneOffSchedule's own real calendar date, and never produces a date
+    earlier than reference_date itself.
     """
     if isinstance(schedule, OneOffSchedule):
         return [schedule]
 
     reference_date = reference_date or date.today()
-    week_monday = reference_date - timedelta(days=reference_date.weekday())
     instances = []
     for weekday in schedule.weekdays:
-        instance_date = week_monday + timedelta(days=weekday)
+        days_ahead = (weekday - reference_date.weekday()) % 7
+        instance_date = reference_date + timedelta(days=days_ahead)
         instances.append(
             OneOffSchedule(
                 earliest_departure=datetime.combine(instance_date, schedule.earliest_departure_time),

@@ -1,4 +1,4 @@
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from app.matching.scoring import (
     can_ever_be_matched,
@@ -200,3 +200,52 @@ def test_expand_schedule_recurring_instances_score_independently():
     scores = [temporal_score(instance, narrow_window) for instance in instances]
     assert scores[2] > 0
     assert all(score == 0 for i, score in enumerate(scores) if i != 2)
+
+
+def test_expand_schedule_recurring_never_lands_on_a_date_before_reference_date():
+    # A Thursday reference_date with weekdays=[0] (Monday) is exactly the
+    # reproduction that was real, not theoretical: the old week_monday-based
+    # expansion put this 3 days *before* reference_date (last Monday), not
+    # the upcoming one -- confirmed live, this used to fail.
+    thursday = date(2026, 11, 19)
+    assert thursday.weekday() == 3
+    instances = expand_schedule(
+        RecurringSchedule(
+            weekdays=[0], earliest_departure_time=time(9, 0), latest_departure_time=time(9, 30)
+        ),
+        reference_date=thursday,
+    )
+    assert len(instances) == 1
+    assert instances[0].earliest_departure.date() == date(2026, 11, 23)  # the upcoming Monday
+    assert instances[0].earliest_departure.date() >= thursday
+
+
+def test_expand_schedule_recurring_keeps_todays_own_weekday_on_reference_date():
+    thursday = date(2026, 11, 19)
+    instances = expand_schedule(
+        RecurringSchedule(
+            weekdays=[3], earliest_departure_time=time(9, 0), latest_departure_time=time(9, 30)
+        ),
+        reference_date=thursday,
+    )
+    assert instances[0].earliest_departure.date() == thursday
+
+
+def test_expand_schedule_recurring_multiple_weekdays_still_span_less_than_a_week():
+    # Same invariant test_expand_schedule_recurring_returns_one_instance_per_weekday
+    # already checks against the sample dataset -- re-asserted here against
+    # the Thursday reference_date above, where the old week-anchored
+    # expansion and the new next-occurrence expansion actually disagree on
+    # individual dates (just not on this span property).
+    thursday = date(2026, 11, 19)
+    instances = expand_schedule(
+        RecurringSchedule(
+            weekdays=[0, 1, 2, 3, 4],
+            earliest_departure_time=time(9, 0),
+            latest_departure_time=time(9, 30),
+        ),
+        reference_date=thursday,
+    )
+    dates = {i.earliest_departure.date() for i in instances}
+    assert max(dates) - min(dates) < timedelta(days=7)
+    assert min(dates) >= thursday
