@@ -124,11 +124,40 @@ def cancel_request(request_id: UUID, request: Request) -> RideRequestPublic:
     its 30-day anonymization clock to start over from the cancel instead of
     from the window's own latest_departure, needlessly extending how long
     its precise location/contact sat around unredacted.
+
+    Re-reads and re-checks the store a second time, right before writing
+    the cancellation, instead of trusting the single read from the top of
+    this function. This is a sync route, which Starlette dispatches to a
+    threadpool worker, not the asyncio event loop that engine.run_forever()
+    (and the on_new_request() it calls) runs on -- so a real match for
+    this exact request can land in the gap between this function's first
+    read and its write, the same kind of interleaving the engine's own
+    on_new_request() already guards against from the opposite direction
+    (app/matching/engine.py's two "store-backed race" rechecks). Without
+    this second check, writing CANCELLED here would use `target` as read
+    *before* that match -- silently overwriting a real match's MATCHED
+    status and wiping its matched_with back to None, while the matched
+    counterpart's own row still points back at this one, now-inconsistent
+    id. Confirmed real, not theoretical, with a live script before this
+    fix: captured cancel_request()'s own first read of an OPEN, pooled
+    request, ran the real on_new_request() against it from a concurrent
+    caller (matching it for real, flipping its stored status to MATCHED),
+    then resumed the stale cancel with that first read -- the DB came back
+    CANCELLED/matched_with=None, erasing the match, while the counterpart's
+    row still said MATCHED/matched_with=<the erased request's id>.
     """
     store = request.app.state.store
     target = store.get(request_id)
     if target is None:
         raise HTTPException(status_code=404, detail="request not found")
+    effective_status = to_public(target).status
+    if effective_status != RequestStatus.OPEN:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot cancel a request with status '{effective_status.value}'",
+        )
+
+    target = store.get(request_id)
     effective_status = to_public(target).status
     if effective_status != RequestStatus.OPEN:
         raise HTTPException(

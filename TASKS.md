@@ -61,6 +61,53 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 49. Stop a concurrent match from being silently overwritten by a stale cancel
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found the missing other half of
+  the exact race class tasks 44-47's own engine-side rechecks already cover
+  -- this one's in `cancel_request()` (`app/router.py`) itself, which never
+  got the symmetric fix.
+- `on_new_request()` already rechecks the store right before finalizing a
+  match, specifically to guard against a concurrent cancel landing on
+  either side of the pair mid-scoring (see its own two "store-backed race"
+  comments). But I never applied the mirror-image guard to
+  `cancel_request()`: it reads the target once at the top, checks its
+  status, and writes `CANCELLED` using that same, now-possibly-stale
+  object -- with nothing re-checking in between. `cancel_request()` is a
+  sync route, which Starlette dispatches to a threadpool worker, not the
+  asyncio event loop `run_forever()`/`on_new_request()` run on, so a real
+  match for the exact request being cancelled can land in that gap. Caught
+  this live, not theoretically, with a script before writing any fix:
+  captured `cancel_request()`'s own first read of an OPEN, pooled request,
+  ran the real `on_new_request()` against it concurrently (a genuine
+  match, flipping its stored status to MATCHED and handing the
+  counterpart a real reveal), then resumed the stale cancel with that
+  pre-match read -- the DB came back CANCELLED with `matched_with` wiped
+  to None, silently erasing the match, while the counterpart's own row
+  still pointed back at it as MATCHED. Anyone relying on that match (the
+  counterpart's live WebSocket reveal, or a later `GET
+  /requests/{id}?viewer_request_id=`) would've been left looking at a
+  stranger's now-broken, contradictory pair of rows.
+- Fix: `cancel_request()` now re-fetches and re-checks the request's
+  computed status a second time, immediately before writing the
+  cancellation, using that fresh read (not the original one) for the
+  write -- the same "recheck right at the point of no return" pattern
+  `on_new_request()` already uses, just applied from the other side. If a
+  match landed in the gap, this second check now sees MATCHED and 409s
+  instead of overwriting it.
+- Tests: `tests/test_requests_api.py` adds
+  `test_cancel_does_not_revert_a_match_that_landed_between_its_read_and_its_write`,
+  calling the real `cancel_request()` directly (not through TestClient, so
+  the interleaving is deterministic) with a monkeypatched `to_public` that
+  pauses after the function's first read, runs a real `on_new_request()`
+  match against the exact same request while paused, then resumes --
+  asserting the cancel 409s and both sides of the match are still intact
+  in the store afterward. Ran it against the pre-fix code first
+  (temporarily stashing just `app/router.py`) to confirm it actually fails
+  there -- a real `200`/`cancelled` with `matched_with` wiped, not just
+  that it passes now. Full suite: 196 tests, up from 195, all green.
+
 ### 48. Fix expand_schedule() anchoring a recurring weekday to the past instead of its next real occurrence
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug

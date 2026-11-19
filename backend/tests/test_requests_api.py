@@ -1,9 +1,17 @@
+import threading
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app import router as router_module
+from app.db import make_session_factory
 from app.main import app
+from app.matching.engine import MatchingEngine
+from app.router import cancel_request
+from app.schemas import Location, OneOffSchedule, RequestStatus, RideRequest
+from app.store import RequestStore
 
 # Real Fairfax/Aldie coordinates, mirroring app/sample_data.py's rider-1 and
 # rider-7 (close origin, same destination, overlapping window) -- the
@@ -510,3 +518,84 @@ def test_cancel_an_expired_request_returns_409():
     assert response.json()["detail"] == "cannot cancel a request with status 'expired'"
     # Still just "expired", not silently flipped to "cancelled".
     assert detail.json()["status"] == "expired"
+
+
+def _store_backed_request(rider_id: str, lat: float, lng: float) -> RideRequest:
+    now = datetime.utcnow()
+    return RideRequest(
+        rider_id=rider_id,
+        origin=Location(lat=lat, lng=lng),
+        destination=Location(lat=38.9757, lng=-77.6122),
+        schedule=OneOffSchedule(
+            earliest_departure=now + timedelta(hours=2),
+            latest_departure=now + timedelta(hours=2, minutes=30),
+        ),
+        seats_needed=1,
+        contact="555-0506",
+    )
+
+
+def test_cancel_does_not_revert_a_match_that_landed_between_its_read_and_its_write(monkeypatch):
+    # cancel_request() (app/router.py) is a sync route, which Starlette
+    # dispatches to a threadpool worker, not the asyncio event loop
+    # run_forever()/on_new_request() run on -- so a real match for this
+    # exact request can land in the gap between cancel_request()'s first
+    # read of it and the write that flips it to CANCELLED. Forces that
+    # exact interleaving deterministically: pauses cancel_request() right
+    # after its first read (via a monkeypatched to_public, called with the
+    # OPEN request it just read), runs the real on_new_request() against
+    # that same request from the "concurrent" side while paused, then lets
+    # cancel_request() resume into its own second read/recheck.
+    session_factory = make_session_factory()
+    store = RequestStore(session_factory)
+    engine = MatchingEngine(store=store)
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(store=store, engine=engine)))
+
+    target = _store_backed_request("rider-cancel-race-target", 38.8462, -77.3064)
+    incoming = _store_backed_request("rider-cancel-race-incoming", 38.8500, -77.3100)
+    store.add(target)
+    store.add(incoming)
+    engine._unmatched.append(target)
+
+    reached = threading.Event()
+    release = threading.Event()
+    real_to_public = router_module.to_public
+    call_count = {"n": 0}
+
+    def pausing_to_public(request_obj):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            reached.set()
+            release.wait(timeout=5)
+        return real_to_public(request_obj)
+
+    monkeypatch.setattr(router_module, "to_public", pausing_to_public)
+
+    result: dict = {}
+
+    def run_cancel():
+        try:
+            result["response"] = cancel_request(target.id, fake_request)
+        except Exception as exc:
+            result["exception"] = exc
+
+    worker = threading.Thread(target=run_cancel)
+    worker.start()
+    assert reached.wait(timeout=5), "cancel_request never reached its first read"
+
+    matches = engine.on_new_request(incoming)
+    assert len(matches) == 1
+
+    release.set()
+    worker.join(timeout=5)
+
+    assert "response" not in result, f"cancel_request did not 409: {result}"
+    exc = result["exception"]
+    assert getattr(exc, "status_code", None) == 409
+
+    stored_target = store.get(target.id)
+    assert stored_target.status == RequestStatus.MATCHED
+    assert stored_target.matched_with == incoming.id
+    stored_incoming = store.get(incoming.id)
+    assert stored_incoming.status == RequestStatus.MATCHED
+    assert stored_incoming.matched_with == target.id
