@@ -61,6 +61,61 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 50. Stop a near-year-1/year-9999 departure time from crashing fuzz_schedule() with a bare OverflowError
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found one in `app/privacy.py`'s
+  `fuzz_schedule()` -- a datetime-arithmetic crash, not the validation
+  gaps or race conditions most of the recent entries here were.
+- Nothing in `OneOffSchedule`'s own validator (`app/schemas.py`) bounds how
+  far in the past or future `earliest_departure`/`latest_departure` can be
+  -- it only checks the two fields are naive (timezone-free) and correctly
+  ordered. That leaves a real, reachable input nothing stops: a schedule
+  within `FUZZ_PADDING` (15 minutes) of either end of the datetime range
+  Python can even represent (year 1 or year 9999 -- plausible from a
+  4-digit-year typo on a non-browser client, e.g. "0001" instead of
+  "2026," same as any other field-mistype this form already guards
+  against elsewhere). Confirmed this was real, not theoretical, with a
+  live `TestClient` call before writing any fix: `POST /requests` with
+  `earliest_departure="0001-01-01T00:05:00"` validated cleanly through
+  `OneOffSchedule`'s own checks and then raised a bare `OverflowError:
+  date value out of range` from `fuzz_schedule()`'s own `schedule.
+  earliest_departure - FUZZ_PADDING` -- and it crashed on the *same* `POST
+  /requests` call that created the request, not some later read, since
+  `create_request()` (`app/router.py`) already calls `to_public()` ->
+  this function for its own response. Worse, once such a row exists and
+  stays open, `GET /requests`/`GET /browse` call the same
+  `to_list_item()`/`to_public()` path for *every* open request on every
+  call -- so one bad row kept crashing the public listing for every
+  caller, not just the poster who triggered it.
+- Fix: a new `_shift_datetime()` helper, the `OneOffSchedule` counterpart
+  to this same function's existing `_shift_time()` (which already clamps
+  a `RecurringSchedule`'s time-of-day fields at midnight instead of
+  wrapping, for the exact same "don't let the shift produce something
+  unrepresentable" reason) -- it widens a datetime by `FUZZ_PADDING` and
+  clamps to `datetime.min`/`datetime.max` on overflow instead of letting
+  the arithmetic raise. `fuzz_schedule()`'s `OneOffSchedule` branch now
+  calls it instead of doing the add/subtract inline. Deliberately doesn't
+  add a new bound to `OneOffSchedule` itself to reject an extreme date at
+  intake -- unlike the Postgres-column-limit fixes (seats_needed, NUL
+  bytes), there's no actual storage limit being violated here; Postgres'
+  `DateTime` column and Python's own `datetime` already agree on the same
+  year 1-9999 range, so rejecting it would be inventing a new product
+  rule about how far out a trip can be scheduled that nothing in
+  SCOPE.md/TASKS.md calls for. This just stops the one function that
+  actually crashes from crashing.
+- Tests: `tests/test_privacy.py` adds
+  `test_fuzz_schedule_clamps_one_off_window_at_the_datetime_range_instead_of_overflowing`
+  (both ends, directly against `fuzz_schedule()`). `tests/test_requests_api.py`
+  adds the HTTP-level reproduction,
+  `test_create_request_near_the_edge_of_the_datetime_range_does_not_500_on_its_own_response`
+  -- the exact year-1 payload above now `201`s, and a following `GET
+  /requests` stays `200` instead of crashing. Ran both against the
+  pre-fix code first (temporarily stashing just `app/privacy.py`) to
+  confirm they actually fail there -- a real `500`/uncaught
+  `OverflowError`, not just that they pass now. Full suite: 198 tests, up
+  from 196, all green.
+
 ### 49. Stop a concurrent match from being silently overwritten by a stale cancel
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

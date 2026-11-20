@@ -216,6 +216,38 @@ def test_create_request_rejects_seats_needed_beyond_postgres_integer_range():
     assert response.status_code == 422
 
 
+def test_create_request_near_the_edge_of_the_datetime_range_does_not_500_on_its_own_response():
+    # Nothing in OneOffSchedule's own validator bounds how far in the past
+    # or future earliest_departure/latest_departure can be -- only that
+    # they're naive and correctly ordered -- so a schedule within
+    # FUZZ_PADDING of either end of the datetime range Python can
+    # represent used to crash app/privacy.py's fuzz_schedule() with a bare
+    # OverflowError. Confirmed this was real, not theoretical, with a live
+    # TestClient call before this fix: this exact payload 500'd inside
+    # create_request() itself (app/router.py already calls to_public() ->
+    # fuzz_schedule() for its own response), not on some later GET -- the
+    # request was never even successfully created.
+    payload = {
+        "rider_id": "rider-year-one",
+        "origin": {"lat": FAIRFAX[0], "lng": FAIRFAX[1]},
+        "destination": {"lat": ALDIE[0], "lng": ALDIE[1]},
+        "schedule": {
+            "earliest_departure": "0001-01-01T00:05:00",
+            "latest_departure": "0001-01-01T00:10:00",
+        },
+        "seats_needed": 1,
+        "contact": "555-0604",
+    }
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/requests", json=payload)
+        assert response.status_code == 201
+
+        list_response = client.get("/requests")
+
+    assert list_response.status_code == 200
+
+
 def test_list_requests_never_includes_precise_location_or_contact():
     payload = _one_off_payload(
         "rider-privacy-test-2", FAIRFAX, ALDIE, 120, 30, contact="555-8888-secret"

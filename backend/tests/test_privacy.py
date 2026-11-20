@@ -55,6 +55,35 @@ def test_fuzz_schedule_clamps_recurring_window_at_midnight_instead_of_wrapping()
     assert fuzzed_late.latest_departure_time == time(23, 59, 59, 999999)
 
 
+def test_fuzz_schedule_clamps_one_off_window_at_the_datetime_range_instead_of_overflowing():
+    # Regression: nothing in OneOffSchedule's own validator bounds how far
+    # in the past or future earliest_departure/latest_departure can be --
+    # only that the two fields are naive and correctly ordered. A schedule
+    # within FUZZ_PADDING of either end of the datetime range Python can
+    # represent at all used to crash fuzz_schedule() itself with a bare
+    # OverflowError (schedule.earliest_departure - FUZZ_PADDING, or
+    # schedule.latest_departure + FUZZ_PADDING, stepping past
+    # datetime.min/datetime.max), not a clean result -- and since
+    # create_request() (app/router.py) already calls to_public() -> this
+    # function for its own response, this crashed the very POST /requests
+    # call that created the request, not just a later GET.
+    near_the_beginning_of_time = OneOffSchedule(
+        earliest_departure=datetime(1, 1, 1, 0, 5, 0),
+        latest_departure=datetime(1, 1, 1, 0, 10, 0),
+    )
+    fuzzed_early = fuzz_schedule(near_the_beginning_of_time)
+    assert fuzzed_early.earliest_departure == datetime.min
+    assert fuzzed_early.latest_departure == datetime(1, 1, 1, 0, 25, 0)
+
+    near_the_end_of_time = OneOffSchedule(
+        earliest_departure=datetime(9999, 12, 31, 23, 50, 0),
+        latest_departure=datetime(9999, 12, 31, 23, 55, 0),
+    )
+    fuzzed_late = fuzz_schedule(near_the_end_of_time)
+    assert fuzzed_late.earliest_departure == datetime(9999, 12, 31, 23, 35, 0)
+    assert fuzzed_late.latest_departure == datetime.max
+
+
 def test_to_public_never_includes_contact_or_precise_location():
     schedule = OneOffSchedule(
         earliest_departure=datetime.utcnow() + timedelta(hours=1),

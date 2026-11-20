@@ -42,14 +42,47 @@ def _shift_time(value: time, delta: timedelta) -> time:
     return max(day_start, min(shifted, day_end)).time()
 
 
+def _shift_datetime(value: datetime, delta: timedelta) -> datetime:
+    """OneOffSchedule's equivalent of _shift_time just above -- same
+    "clamp instead of wrap/crash" reasoning, just on a full datetime
+    instead of a bare time, so there's no day boundary to clamp to, only
+    datetime.min/datetime.max themselves.
+
+    Nothing in OneOffSchedule's own validator (app/schemas.py) bounds how
+    far in the past or future earliest_departure/latest_departure can be
+    -- it only checks the two fields are naive and correctly ordered. A
+    client (deliberately or by a date-typo accident, e.g. a 4-digit year
+    field that only got "0001" instead of "2026") can post a schedule
+    within FUZZ_PADDING of either end of the datetime range Python can
+    represent at all. Confirmed this was real, not theoretical, with a
+    live TestClient call before this fix: POST /requests with
+    earliest_departure="0001-01-01T00:05:00" validated cleanly through
+    OneOffSchedule's own checks and then raised a bare `OverflowError:
+    date value out of range` from fuzz_schedule()'s own `schedule.
+    earliest_departure - FUZZ_PADDING` -- not a 422, not even a 500 on
+    some later GET, but a 500 on *that same* POST /requests call, since
+    create_request() (app/router.py) already calls to_public() -> this
+    function for its own response. And because GET /requests/GET /browse
+    call this same to_list_item()/to_public() path for every open
+    request, the one bad row keeps crashing those endpoints for every
+    caller for as long as it stays open -- a single reachable POST taking
+    down the public listing for everyone, not just a once-off crash on
+    its own response.
+    """
+    try:
+        return value + delta
+    except OverflowError:
+        return datetime.max if delta > timedelta(0) else datetime.min
+
+
 def fuzz_schedule(
     schedule: Union[OneOffSchedule, RecurringSchedule],
 ) -> Union[OneOffSchedule, RecurringSchedule]:
     """Same schedule shape, widened by FUZZ_PADDING on both ends."""
     if isinstance(schedule, OneOffSchedule):
         return OneOffSchedule(
-            earliest_departure=schedule.earliest_departure - FUZZ_PADDING,
-            latest_departure=schedule.latest_departure + FUZZ_PADDING,
+            earliest_departure=_shift_datetime(schedule.earliest_departure, -FUZZ_PADDING),
+            latest_departure=_shift_datetime(schedule.latest_departure, FUZZ_PADDING),
         )
     return RecurringSchedule(
         weekdays=schedule.weekdays,
