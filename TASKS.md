@@ -61,6 +61,52 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 52. Stop a Nominatim HTTP failure from 500ing GET /geocode instead of a clean 503
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found the other half of task 45's
+  own gap in `app/geocoding.py`/`app/router.py` -- that one was about a
+  malformed JSON *payload* from Nominatim, this one's about Nominatim's
+  *HTTP transport* itself (a bad status, a timeout, a dropped connection).
+- `geocode_place()` deliberately lets a real HTTP failure from Nominatim
+  propagate as a raw `httpx` exception instead of swallowing it into a
+  silently wrong match -- that's an intentional, already-tested decision
+  (`tests/test_geocoding.py`'s
+  `test_geocode_place_propagates_http_errors_instead_of_a_silent_wrong_match`),
+  and I didn't touch it. But `GET /geocode` (`app/router.py`) only ever
+  caught `PlaceNotFoundError` -- so that propagated exception had nowhere
+  to land. Confirmed this was real, not theoretical, with a live
+  `TestClient` call before writing any fix: mocking a Nominatim `503`
+  response, and separately a connection timeout, both came back through
+  the real `GET /geocode` route as a bare, unhandled `500` -- identical to
+  an actual server bug, with nothing telling a caller "the geocoding
+  service is temporarily unavailable, try again" apart from "that place
+  doesn't exist here." Nominatim is a free, rate-limited third-party
+  service with no SLA (this same module's own
+  `MIN_SECONDS_BETWEEN_REQUESTS` rate limiter already treats it that way),
+  so a transient `429`/`503` or timeout is a real, expected production
+  failure mode, not a hypothetical one -- and this sandbox's own network
+  policy denying the real Nominatim host outright (per task 10/45's own
+  notes) means this exact gap could never have shown up by just running
+  the app here and trying it, only by deliberately reproducing the failure.
+- Fix: `GET /geocode` now also catches `httpx.HTTPError` (the common base
+  for both `HTTPStatusError`, from `raise_for_status()`, and a transport
+  failure like `TimeoutException`/`ConnectError`) and turns it into a
+  clean `503` with a clear "temporarily unavailable" message, instead of
+  letting it fall through as an unhandled `500`. No change to
+  `geocode_place()` itself -- it still propagates exactly as before and
+  the existing test proving that stays green; this only adds the one
+  router-level boundary that was missing.
+- Tests: `tests/test_geocoding.py` adds
+  `test_geocode_endpoint_503s_instead_of_a_raw_500_on_a_nominatim_error_status`
+  and `test_geocode_endpoint_503s_instead_of_a_raw_500_on_a_nominatim_timeout`
+  (both reproductions above, through the real `GET /geocode` route). Ran
+  both against the pre-fix code first (temporarily stashing just
+  `app/router.py`) to confirm they actually fail there -- a real unhandled
+  `httpx.ConnectTimeout`/`HTTPStatusError` surfacing out of the test
+  client, not just that they pass now. Full suite: 203 tests, up from 201,
+  all green.
+
 ### 51. Close the race task 49's "recheck right before writing" fix only narrowed, with an atomic conditional write
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from app.geocoding import PlaceNotFoundError, geocode_place
@@ -43,11 +44,41 @@ def geocode(q: str) -> Location:
     """Turns a free-text place name into coordinates (TASKS.md #10) -- the
     thing a client calls *before* POST /requests, not a change to that
     endpoint's shape. 404s with a clear message on no match rather than
-    guessing a location."""
+    guessing a location.
+
+    geocode_place() itself deliberately lets a real HTTP failure from
+    Nominatim (a non-2xx response, a timeout, a dropped connection)
+    propagate as a raw httpx exception instead of swallowing it into a
+    silently wrong match (see tests/test_geocoding.py's
+    test_geocode_place_propagates_http_errors_instead_of_a_silent_wrong_match)
+    -- that part is intentional and untouched here. But this route only
+    ever caught PlaceNotFoundError, so that propagated exception had
+    nowhere to land: it reached the caller as a bare, uninformative 500,
+    identical to an actual server bug, instead of a clear "the geocoding
+    service is temporarily unavailable" the caller could tell apart from
+    "that place doesn't exist" and reasonably retry. Confirmed real, not
+    theoretical, with a live TestClient call before this fix: mocking
+    Nominatim returning a 503, and separately a connection timeout, both
+    came back as an unhandled 500 through this exact endpoint -- and
+    Nominatim is a free, rate-limited third-party service with no SLA
+    (this module's own MIN_SECONDS_BETWEEN_REQUESTS rate limiter already
+    treats it as one), so a transient 429/503 or timeout is a real,
+    expected failure mode in production, not a hypothetical one.
+    httpx.HTTPError is the common base for both a bad status
+    (HTTPStatusError, from raise_for_status()) and a transport failure
+    (TimeoutException/ConnectError, both RequestError subclasses), so one
+    clause covers everything geocode_place() can actually propagate beyond
+    PlaceNotFoundError.
+    """
     try:
         return geocode_place(q)
     except PlaceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="geocoding service is temporarily unavailable -- try again shortly",
+        ) from exc
 
 
 @router.post("/requests", response_model=RideRequestPublic, status_code=201)

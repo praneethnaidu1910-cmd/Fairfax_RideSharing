@@ -201,3 +201,44 @@ def test_geocode_endpoint_404s_with_clear_error_for_unrecognized_place(mock_geoc
 
     assert response.status_code == 404
     assert "Nowhereville" in response.json()["detail"]
+
+
+@patch("app.router.geocode_place")
+def test_geocode_endpoint_503s_instead_of_a_raw_500_on_a_nominatim_error_status(
+    mock_geocode_place,
+):
+    # geocode_place() deliberately propagates a real HTTP failure from
+    # Nominatim rather than swallowing it into a silently wrong match (see
+    # test_geocode_place_propagates_http_errors_instead_of_a_silent_wrong_match
+    # above) -- but this route used to only catch PlaceNotFoundError, so
+    # that propagated exception reached the caller as a bare, unhandled 500
+    # indistinguishable from an actual server bug.
+    mock_geocode_place.side_effect = httpx.HTTPStatusError(
+        "boom",
+        request=httpx.Request("GET", "https://nominatim.openstreetmap.org/search"),
+        response=httpx.Response(
+            503, request=httpx.Request("GET", "https://nominatim.openstreetmap.org/search")
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/geocode", params={"q": "Reston"})
+
+    assert response.status_code == 503
+    assert "temporarily unavailable" in response.json()["detail"]
+
+
+@patch("app.router.geocode_place")
+def test_geocode_endpoint_503s_instead_of_a_raw_500_on_a_nominatim_timeout(mock_geocode_place):
+    # Same gap as the error-status case above, but hit via a transport-level
+    # failure (httpx.ConnectTimeout, an httpx.RequestError subclass) instead
+    # of a bad response status -- a timeout never even reaches
+    # raise_for_status(), so it's a genuinely different code path through
+    # geocode_place(), not just a different exception value.
+    mock_geocode_place.side_effect = httpx.ConnectTimeout("timed out")
+
+    with TestClient(app) as client:
+        response = client.get("/geocode", params={"q": "Reston"})
+
+    assert response.status_code == 503
+    assert "temporarily unavailable" in response.json()["detail"]
