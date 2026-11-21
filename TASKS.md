@@ -61,6 +61,79 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 51. Close the race task 49's "recheck right before writing" fix only narrowed, with an atomic conditional write
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found that task 49's own fix
+  (two runs ago) hadn't actually closed the race it set out to close -- it
+  had narrowed it.
+- Task 49 made `cancel_request()` (`app/router.py`) re-read and re-check the
+  store a second time, right before writing CANCELLED, to guard against a
+  real match landing in the gap between its first read and its write. But
+  "recheck right before writing" is still a separate read followed by a
+  separate write -- there's always *some* nonzero gap between that second
+  recheck's own read returning and the write actually committing, and a
+  concurrent match can land in that gap too, just a much smaller one than
+  before. Confirmed this was real, not theoretical, with a live script
+  before writing any fix: paused `cancel_request()` at the very last
+  moment before its own write (its `datetime.utcnow()` call for
+  `status_changed_at`, immediately before the old `store.save()`), ran a
+  real `on_new_request()` match against the exact same request from a
+  concurrent thread right there, then let the stale cancel resume into its
+  write -- it still came back a real `200`/`cancelled`, silently
+  overwriting the match and wiping `matched_with` back to `None`, while
+  the matched counterpart's own row still pointed back at it as MATCHED.
+  Same bug task 49 described, just moved to a narrower window task 49's
+  own fix never actually eliminated -- no amount of rechecking *before*
+  the write closes a gap that exists *because* the check and the write are
+  two separate operations.
+- Fix: a new `RequestStore.save_if_open()` (`app/store.py`) that does the
+  whole thing -- check and write -- as a single conditional SQL statement,
+  `UPDATE ride_requests SET ... WHERE id = :id AND status = 'open'`,
+  instead of a read followed by a write. Postgres's own row-level locking
+  serializes two concurrent writers against the same row: whichever one
+  commits second has its `WHERE status = 'open'` evaluated against the
+  first one's already-committed row, not against whatever either side
+  read before either one wrote -- there's no gap left for a third write to
+  land in, because there's only one statement. Returns whether the write
+  actually took effect (`rowcount > 0`), so the caller can tell a real
+  cancel from one that lost the race. `cancel_request()` now does a single
+  read+check up front (for a fast, friendly 404/409 on the common,
+  non-racy path) and then calls `save_if_open()` for the actual write --
+  on a lost race, it re-reads once more purely to report an accurate
+  status in the 409, not as a guard; `save_if_open()`'s own `WHERE` clause
+  is the only thing that actually decides whether the cancel happened.
+  Deliberately didn't touch `RequestStore.save()` itself (still a blind
+  overwrite) or its other two call sites (`app/matching/engine.py`'s own
+  match-time writes) -- `save()` is still exactly what a handful of tests
+  and the engine's own match path intentionally rely on, and the engine
+  side has the identical shape of gap (its own two "recheck before
+  writing" guards have the same narrowing-not-closing problem this fix
+  just described) but fixing it needs a real design decision this task
+  doesn't need to make to close the one race actually confirmed live:
+  what should `on_new_request()` do with its already-mutated in-memory
+  `request`/`best_candidate` objects and the pool state it's already
+  changed (`self._unmatched.remove(best_candidate)`) if its own atomic
+  write loses the race -- unwind all of it and report no match, or
+  something else? Left as a flagged gap, not guessed at here, the same
+  way this file flags other open design questions rather than resolving
+  them by assumption.
+- Tests: `tests/test_store_persistence.py` adds
+  `test_save_if_open_writes_and_returns_true_when_the_stored_row_is_still_open`
+  and
+  `test_save_if_open_does_not_write_and_returns_false_when_the_stored_row_is_not_open`
+  directly against the new method. `tests/test_requests_api.py` adds
+  `test_cancel_does_not_revert_a_match_that_lands_right_before_its_own_write`,
+  the exact reproduction above (pausing at the last instant before the
+  write, not just after the first read the way task 49's own test does),
+  asserting the cancel 409s and the real match stays intact. Ran the new
+  `test_requests_api.py` test against the pre-fix code first (temporarily
+  stashing `app/router.py`/`app/store.py`) to confirm it actually fails
+  there -- a real `200`/`cancelled` response overwriting a genuine match,
+  not just that it passes now; task 49's own existing regression test
+  still passes unchanged against the new code. Full suite: 201 tests, up
+  from 198, all green.
+
 ### 50. Stop a near-year-1/year-9999 departure time from crashing fuzz_schedule() with a bare OverflowError
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

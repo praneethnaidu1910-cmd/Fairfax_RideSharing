@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
+from sqlalchemy import update
 from sqlalchemy.orm import sessionmaker
 
 from app.geo import cell_center
@@ -103,6 +104,57 @@ class RequestStore:
                 row.matched_with = request.matched_with
                 row.status_changed_at = request.status_changed_at
             session.commit()
+
+    def save_if_open(self, request: RideRequest) -> bool:
+        """Same write as save() (persisting a status/matched_with/
+        status_changed_at transition already made in place on `request`),
+        but as a single conditional UPDATE -- `WHERE status = 'open'` --
+        instead of a separate read-then-write.
+
+        save() alone blindly overwrites whatever status is currently
+        stored, no matter how long ago `request` was actually read. A
+        caller that first re-reads the row and checks its status before
+        calling save() (POST /requests/{id}/cancel's cancel_request() used
+        to do exactly this, as a second "recheck right before writing")
+        only narrows that gap, it doesn't close it: there's always some
+        nonzero time between that re-read returning and save()'s own
+        commit, and a concurrent writer -- the matching engine flipping
+        this exact request to MATCHED, say -- can still land in it.
+        Confirmed real, not theoretical, with a live script before this
+        fix: paused cancel_request() right after its own second re-read/
+        recheck (both already OPEN), ran a real on_new_request() match
+        against the same request from a concurrent thread in that gap
+        (flipping its stored status to MATCHED for real), then let the
+        stale cancel resume -- it still wrote CANCELLED over the real
+        match, wiping matched_with back to None, while the matched
+        counterpart's own row kept pointing back at it as MATCHED.
+
+        A single `UPDATE ... WHERE status = 'open'` has no such gap:
+        Postgres's own row-level locking serializes two concurrent writers
+        against the same row, and whichever one commits second has its
+        WHERE clause evaluated against the winner's already-committed row,
+        not against whatever either side happened to read before either
+        one wrote. Returns True if the write actually took effect (the row
+        was still OPEN at the moment of the UPDATE), False if it had
+        already moved away from OPEN by then -- the caller lost the race
+        and must not treat `request`'s in-memory status as what actually
+        got stored.
+        """
+        with self._session_factory() as session:
+            result = session.execute(
+                update(RideRequestORM)
+                .where(
+                    RideRequestORM.id == request.id,
+                    RideRequestORM.status == RequestStatus.OPEN.value,
+                )
+                .values(
+                    status=request.status.value,
+                    matched_with=request.matched_with,
+                    status_changed_at=request.status_changed_at,
+                )
+            )
+            session.commit()
+            return result.rowcount > 0
 
     def get(self, request_id: UUID) -> Optional[RideRequest]:
         with self._session_factory() as session:

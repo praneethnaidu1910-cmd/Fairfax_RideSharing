@@ -125,26 +125,35 @@ def cancel_request(request_id: UUID, request: Request) -> RideRequestPublic:
     from the window's own latest_departure, needlessly extending how long
     its precise location/contact sat around unredacted.
 
-    Re-reads and re-checks the store a second time, right before writing
-    the cancellation, instead of trusting the single read from the top of
-    this function. This is a sync route, which Starlette dispatches to a
+    Writes the cancellation with store.save_if_open() -- a single
+    conditional `UPDATE ... WHERE status = 'open'`, not a separate
+    read-then-write -- instead of trusting the read from the top of this
+    function. This is a sync route, which Starlette dispatches to a
     threadpool worker, not the asyncio event loop that engine.run_forever()
     (and the on_new_request() it calls) runs on -- so a real match for
-    this exact request can land in the gap between this function's first
-    read and its write, the same kind of interleaving the engine's own
-    on_new_request() already guards against from the opposite direction
-    (app/matching/engine.py's two "store-backed race" rechecks). Without
-    this second check, writing CANCELLED here would use `target` as read
-    *before* that match -- silently overwriting a real match's MATCHED
-    status and wiping its matched_with back to None, while the matched
-    counterpart's own row still points back at this one, now-inconsistent
-    id. Confirmed real, not theoretical, with a live script before this
-    fix: captured cancel_request()'s own first read of an OPEN, pooled
-    request, ran the real on_new_request() against it from a concurrent
-    caller (matching it for real, flipping its stored status to MATCHED),
-    then resumed the stale cancel with that first read -- the DB came back
-    CANCELLED/matched_with=None, erasing the match, while the counterpart's
-    row still said MATCHED/matched_with=<the erased request's id>.
+    this exact request can land in the gap between any read this function
+    does and its own write.
+
+    This used to guard against that by re-reading and re-checking the
+    store a second time, right before writing -- "recheck right before the
+    point of no return," the same pattern on_new_request() uses from the
+    opposite direction. That narrowed the race, but didn't close it: there
+    was still a real (if small) gap between that second re-read returning
+    and the write landing, and a match could still land in it. Confirmed
+    real, not theoretical, with a live script before this fix: paused
+    cancel_request() right after its own second re-read/recheck (both
+    still OPEN), ran the real on_new_request() against the same request
+    from a concurrent thread in that exact gap (a genuine match, flipping
+    its stored status to MATCHED), then let the stale cancel resume into
+    its write -- it still overwrote the real match with CANCELLED and
+    matched_with=None, while the matched counterpart's own row kept
+    pointing back at it as MATCHED. Checking the status first and writing
+    second is a TOCTOU gap no amount of rechecking before the write closes,
+    because there's always something between the last check and the write
+    itself.
+    save_if_open()'s single conditional UPDATE has no such gap -- see its
+    own docstring (app/store.py) for why a single SQL statement actually
+    closes this instead of narrowing it.
     """
     store = request.app.state.store
     target = store.get(request_id)
@@ -157,20 +166,24 @@ def cancel_request(request_id: UUID, request: Request) -> RideRequestPublic:
             detail=f"cannot cancel a request with status '{effective_status.value}'",
         )
 
-    target = store.get(request_id)
-    effective_status = to_public(target).status
-    if effective_status != RequestStatus.OPEN:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot cancel a request with status '{effective_status.value}'",
-        )
-
     target.status = RequestStatus.CANCELLED
     # TASKS.md #17 reads this to know when a cancelled request became
     # retention-eligible -- same role as the matched_at stamp engine.py
     # writes on a match.
     target.status_changed_at = datetime.utcnow()
-    store.save(target)
+    if not store.save_if_open(target):
+        # Lost a real race to a concurrent writer that reached the store
+        # between the read above and this conditional write -- save_if_open()'s
+        # own WHERE clause is what actually caught it, not this read, which
+        # is only here to report an accurate reason.
+        current = store.get(request_id)
+        effective_status = (
+            to_public(current).status if current is not None else RequestStatus.CANCELLED
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot cancel a request with status '{effective_status.value}'",
+        )
     # store.get() above returned a fresh instance, not whatever object
     # engine._unmatched may hold for this id -- this is what actually
     # stops it from winning a future match, not the status flip alone.

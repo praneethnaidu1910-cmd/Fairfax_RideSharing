@@ -631,3 +631,77 @@ def test_cancel_does_not_revert_a_match_that_landed_between_its_read_and_its_wri
     stored_incoming = store.get(incoming.id)
     assert stored_incoming.status == RequestStatus.MATCHED
     assert stored_incoming.matched_with == target.id
+
+
+def test_cancel_does_not_revert_a_match_that_lands_right_before_its_own_write(monkeypatch):
+    # The test above (task 49) closed the gap between cancel_request()'s
+    # *first* read and its write by adding a second recheck right before
+    # writing -- but "recheck right before writing" still isn't the same
+    # thing as "write atomically": there's still a real, if much smaller,
+    # gap between that second recheck's own read returning and the write
+    # actually landing, and a match can still land in it. Reproduces that
+    # exact narrower race: pauses cancel_request() at the last possible
+    # moment before its write (datetime.utcnow(), called for
+    # status_changed_at immediately before store.save_if_open()), runs a
+    # real on_new_request() match against the same request from a
+    # concurrent thread right there, then lets the stale cancel resume
+    # into its own write. Before this task's fix (store.save_if_open()'s
+    # single conditional UPDATE, replacing the old read-then-write save()),
+    # this interleaving still overwrote the real match with CANCELLED --
+    # confirmed live against the pre-fix code, not just inferred.
+    session_factory = make_session_factory()
+    store = RequestStore(session_factory)
+    engine = MatchingEngine(store=store)
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(store=store, engine=engine)))
+
+    target = _store_backed_request("rider-cancel-race-target-2", 38.8462, -77.3064)
+    incoming = _store_backed_request("rider-cancel-race-incoming-2", 38.8500, -77.3100)
+    store.add(target)
+    store.add(incoming)
+    engine._unmatched.append(target)
+
+    reached = threading.Event()
+    release = threading.Event()
+    real_utcnow = router_module.datetime.utcnow
+
+    class _PausingDatetime:
+        _fired = False
+
+        @staticmethod
+        def utcnow():
+            if not _PausingDatetime._fired:
+                _PausingDatetime._fired = True
+                reached.set()
+                release.wait(timeout=5)
+            return real_utcnow()
+
+    monkeypatch.setattr(router_module, "datetime", _PausingDatetime)
+
+    result: dict = {}
+
+    def run_cancel():
+        try:
+            result["response"] = cancel_request(target.id, fake_request)
+        except Exception as exc:
+            result["exception"] = exc
+
+    worker = threading.Thread(target=run_cancel)
+    worker.start()
+    assert reached.wait(timeout=5), "cancel_request never reached its own write"
+
+    matches = engine.on_new_request(incoming)
+    assert len(matches) == 1
+
+    release.set()
+    worker.join(timeout=5)
+
+    assert "response" not in result, f"cancel_request did not 409: {result}"
+    exc = result["exception"]
+    assert getattr(exc, "status_code", None) == 409
+
+    stored_target = store.get(target.id)
+    assert stored_target.status == RequestStatus.MATCHED
+    assert stored_target.matched_with == incoming.id
+    stored_incoming = store.get(incoming.id)
+    assert stored_incoming.status == RequestStatus.MATCHED
+    assert stored_incoming.matched_with == target.id

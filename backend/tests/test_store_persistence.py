@@ -73,3 +73,49 @@ def test_save_persists_a_status_change_across_a_simulated_restart():
     assert fetched is not None
     assert fetched.status.value == "matched"
     assert fetched.matched_with == other.id
+
+
+def test_save_if_open_writes_and_returns_true_when_the_stored_row_is_still_open():
+    request = _sample_request("rider-save-if-open-true")
+    other = _sample_request("rider-save-if-open-true-2")
+    store = RequestStore(make_session_factory())
+    store.add(request)
+    store.add(other)
+
+    request.status = RequestStatus.CANCELLED
+    request.matched_with = None
+    request.status_changed_at = datetime.utcnow()
+    assert store.save_if_open(request) is True
+
+    fetched = store.get(request.id)
+    assert fetched.status == RequestStatus.CANCELLED
+
+
+def test_save_if_open_does_not_write_and_returns_false_when_the_stored_row_is_not_open():
+    # The exact TOCTOU gap this method exists to close: `request` here is a
+    # stale in-memory read (still showing OPEN) of a row some other writer
+    # already flipped away from OPEN in the store. A blind save() would
+    # overwrite that -- save_if_open()'s own WHERE clause is what has to
+    # catch it instead, in one atomic statement, not a separate read first.
+    request = _sample_request("rider-save-if-open-false")
+    other = _sample_request("rider-save-if-open-false-2")
+    store = RequestStore(make_session_factory())
+    store.add(request)
+    store.add(other)
+
+    # A different writer gets there first, for real, in the store.
+    already_matched = RequestStore(make_session_factory()).get(request.id)
+    already_matched.status = RequestStatus.MATCHED
+    already_matched.matched_with = other.id
+    already_matched.status_changed_at = datetime.utcnow()
+    RequestStore(make_session_factory()).save(already_matched)
+
+    # `request` is still the stale, pre-match, OPEN-looking local object.
+    request.status = RequestStatus.CANCELLED
+    request.matched_with = None
+    request.status_changed_at = datetime.utcnow()
+    assert store.save_if_open(request) is False
+
+    fetched = store.get(request.id)
+    assert fetched.status == RequestStatus.MATCHED
+    assert fetched.matched_with == other.id
