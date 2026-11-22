@@ -778,6 +778,86 @@ def test_on_new_request_does_not_revert_a_cancel_of_the_incoming_request_itself(
     assert incoming not in engine._unmatched
 
 
+def test_on_new_request_does_not_revert_a_cancel_that_lands_right_before_its_own_write(
+    monkeypatch,
+):
+    # The sliver the two race tests just above don't reach: both of them
+    # cancel *during scoring*, which the post-scoring rechecks (the ones
+    # those two tests exist to prove) catch cleanly. This one cancels
+    # *after* the second recheck has already passed -- both sides still
+    # OPEN -- but before the matched_at write that follows it actually
+    # lands. "Recheck right before writing" is still a separate read
+    # followed by a separate write, so there's always some nonzero gap
+    # between them, exactly the same shape save_if_open() closed for
+    # cancel_request() (task 51) -- just on the engine's own match-commit
+    # side this time, which used two separate save() calls with the same
+    # gap neither recheck above can close. Pauses right after
+    # on_new_request()'s own matched_at := datetime.utcnow() call (its
+    # first action once both rechecks have passed) via a monkeypatched
+    # datetime, runs the real cancel_request() sequence against the pooled
+    # candidate from another thread in that exact gap, then lets
+    # on_new_request() resume into its write.
+    session_factory = make_session_factory()
+    store = RequestStore(session_factory)
+    engine = MatchingEngine(store=store)
+
+    candidate = _store_backed_request("rider-write-race-candidate", 38.8462, -77.3064)
+    incoming = _store_backed_request("rider-write-race-incoming", 38.8500, -77.3100)
+    store.add(candidate)
+    store.add(incoming)
+    engine._unmatched.append(candidate)
+
+    reached = threading.Event()
+    release = threading.Event()
+    real_datetime = engine_module.datetime
+
+    class PausingDatetime(real_datetime):
+        _fired = False
+
+        @classmethod
+        def utcnow(cls):
+            if not cls._fired:
+                cls._fired = True
+                reached.set()
+                release.wait(timeout=5)
+            return real_datetime.utcnow()
+
+    monkeypatch.setattr(engine_module, "datetime", PausingDatetime)
+
+    result: dict = {}
+
+    def run_on_new_request():
+        try:
+            result["matches"] = engine.on_new_request(incoming)
+        except Exception as exc:  # pragma: no cover -- only hit pre-fix
+            result["exception"] = exc
+
+    worker = threading.Thread(target=run_on_new_request)
+    worker.start()
+    assert reached.wait(timeout=5), "on_new_request never reached its own write"
+
+    # Mirrors router.py's cancel_request() exactly, run concurrently from
+    # what's really a separate thread in production, landing in the gap
+    # between on_new_request()'s matched_at timestamp and its actual write.
+    fresh_candidate = store.get(candidate.id)
+    fresh_candidate.status = RequestStatus.CANCELLED
+    fresh_candidate.status_changed_at = datetime.utcnow()
+    assert store.save_if_open(fresh_candidate) is True
+    engine.remove_from_pool(candidate.id)
+
+    release.set()
+    worker.join(timeout=5)
+
+    assert "exception" not in result, f"on_new_request raised: {result.get('exception')!r}"
+    assert result["matches"] == []
+    assert store.get(candidate.id).status == RequestStatus.CANCELLED
+    assert store.get(candidate.id).matched_with is None
+    assert store.get(incoming.id).status == RequestStatus.OPEN
+    assert store.get(incoming.id).matched_with is None
+    assert candidate not in engine._unmatched
+    assert incoming in engine._unmatched
+
+
 @pytest.mark.asyncio
 async def test_run_forever_does_not_match_a_request_cancelled_while_still_queued():
     # TASKS.md #15's acceptance criterion is "a cancelled request can't

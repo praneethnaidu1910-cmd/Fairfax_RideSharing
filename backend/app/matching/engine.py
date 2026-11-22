@@ -346,8 +346,41 @@ class MatchingEngine:
         request.status_changed_at = matched_at
         best_candidate.status_changed_at = matched_at
         if self._store is not None:
-            self._store.save(request)
-            self._store.save(best_candidate)
+            # The two rechecks just above narrow the gap a concurrent cancel
+            # can land in, but "recheck, then write" always leaves some
+            # nonzero gap between the recheck returning and the write itself
+            # landing -- save_pair_if_both_open() closes that last sliver by
+            # making the pair's write atomic (both sides or neither), instead
+            # of the two separate save() calls this used to be. See its own
+            # docstring (app/store.py) for the live reproduction that
+            # confirmed the gap was real: a cancel landing here used to get
+            # silently reverted to MATCHED, and then crash this call with an
+            # unhandled ValueError on top of it.
+            if not self._store.save_pair_if_both_open(request, best_candidate):
+                # Lost a real race to a concurrent cancel of either side in
+                # that last sliver. best_candidate is untouched in
+                # self._unmatched (only removed below, on confirmed success)
+                # -- if it's the side that's still genuinely OPEN, it's
+                # already right where it needs to be, no action needed. If
+                # it's the side that got cancelled, drop the now-stale entry
+                # instead of leaving it pooled forever. `request` was never
+                # pooled either way, so it only rejoins the pool if it's
+                # still open and still matchable (can_ever_be_matched(), same
+                # reasoning as every other place this engine decides whether
+                # pooling something is worth doing at all).
+                current_candidate = self._store.get(best_candidate.id)
+                if current_candidate is None or current_candidate.status != RequestStatus.OPEN:
+                    self._unmatched = [
+                        r for r in self._unmatched if r.id != best_candidate.id
+                    ]
+                current_request = self._store.get(request.id)
+                if (
+                    current_request is not None
+                    and current_request.status == RequestStatus.OPEN
+                    and can_ever_be_matched(current_request, self.vehicle_capacity)
+                ):
+                    self._unmatched.append(request)
+                return []
         self._unmatched.remove(best_candidate)
         return [
             MatchGroup(

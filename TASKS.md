@@ -61,6 +61,74 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 53. Close the match-commit race task 51 flagged but didn't fix, with an atomic pair write
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found the exact gap task 51's own
+  note already flagged as real but left alone: "the engine side has the
+  identical shape of gap... but fixing it needs a real design decision this
+  task doesn't need to make." Looking at it directly, it turned out not to
+  need a new design decision at all -- the unwind logic it needs is the same
+  shape `on_new_request()` already has twice, just extended one step
+  further.
+- `on_new_request()` already rechecks both sides of a pending match against
+  the store right before committing, to catch a concurrent cancel landing
+  mid-scoring (task 49's own fix). But after both rechecks pass, it used to
+  do the actual commit as two separate `store.save()` calls -- and "recheck,
+  then write" always leaves some nonzero gap between the recheck returning
+  and the write landing, the exact same shape task 51 closed for
+  `cancel_request()` with `save_if_open()`'s single atomic UPDATE. Nothing
+  had closed the mirror-image version of that gap on the engine's own
+  commit side. Confirmed real, not theoretical, with a live script before
+  writing any fix: paused `on_new_request()` right after its own
+  `matched_at = datetime.utcnow()` call (the first thing it does once both
+  rechecks have passed) via a monkeypatched `datetime`, ran the real
+  `cancel_request()` sequence against the pooled candidate from a
+  concurrent thread in that exact gap (a genuine, committed cancel), then
+  let `on_new_request()` resume into its two old `save()` calls -- it still
+  wrote MATCHED over the real cancel for both sides, silently reverting a
+  cancel the poster already got a 200 for, and then crashed with an
+  unhandled `ValueError: list.remove(x): x not in list`, since
+  `cancel_request()`'s own `remove_from_pool()` had already dropped the
+  candidate the engine still expected to find sitting in `self._unmatched`.
+- Fix: a new `RequestStore.save_pair_if_both_open()` (`app/store.py`,
+  `save_if_open()`'s own counterpart for a pair) runs both sides' condi-
+  tional `UPDATE ... WHERE status = 'open'` in one transaction, committing
+  only if *both* affected a row and rolling back -- so neither write takes
+  effect -- if either didn't. `on_new_request()`'s final commit step now
+  calls this once instead of two separate `save()`s, and if it returns
+  `False`, unwinds exactly the way its own two earlier rechecks already do
+  for the version of this race they catch: `best_candidate` is untouched in
+  `self._unmatched` (it's only ever removed on confirmed success), so the
+  side that's still genuinely OPEN needs no action; the side that got
+  cancelled is dropped from the pool instead of left there forever; and
+  `request` itself (never pooled either way) only rejoins the pool if it's
+  still open and still matchable (`can_ever_be_matched()`, same as every
+  other place this engine decides whether pooling something is worth doing
+  at all). Deliberately left `match_batch()` alone -- it has the identical
+  shape of race in principle, but nothing in this codebase actually calls
+  it outside tests (`run_forever()`/`on_new_request()` is the only path a
+  real request ever goes through), so there's no live exposure to close
+  there the way there was here.
+- Tests: `tests/test_store_persistence.py` adds
+  `test_save_pair_if_both_open_writes_both_and_returns_true_when_both_are_still_open`
+  and
+  `test_save_pair_if_both_open_writes_neither_and_returns_false_when_either_is_not_open`
+  (the latter: one side already cancelled by a separate real writer, both
+  sides' stored rows confirmed untouched afterward, not just the cancelled
+  one). `tests/test_engine.py` adds
+  `test_on_new_request_does_not_revert_a_cancel_that_lands_right_before_its_own_write`,
+  the exact reproduction above through the real `on_new_request()`, pausing
+  right after its `matched_at` timestamp instead of mid-scoring the way
+  task 49's two existing race tests do (they cover an earlier part of the
+  same race; this one covers the sliver neither of them reaches). Ran all
+  three against the pre-fix code first (temporarily stashing
+  `app/store.py`/`app/matching/engine.py`) to confirm they actually fail
+  there -- the engine test reproduced the exact unhandled `ValueError`
+  described above, not just a wrong return value, and the two store tests
+  fail with `AttributeError` since `save_pair_if_both_open` doesn't exist
+  pre-fix at all. Full suite: 206 tests, up from 203, all green.
+
 ### 52. Stop a Nominatim HTTP failure from 500ing GET /geocode instead of a clean 503
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

@@ -119,3 +119,67 @@ def test_save_if_open_does_not_write_and_returns_false_when_the_stored_row_is_no
     fetched = store.get(request.id)
     assert fetched.status == RequestStatus.MATCHED
     assert fetched.matched_with == other.id
+
+
+def test_save_pair_if_both_open_writes_both_and_returns_true_when_both_are_still_open():
+    request_a = _sample_request("rider-save-pair-true-a")
+    request_b = _sample_request("rider-save-pair-true-b")
+    store = RequestStore(make_session_factory())
+    store.add(request_a)
+    store.add(request_b)
+
+    matched_at = datetime.utcnow()
+    request_a.status = RequestStatus.MATCHED
+    request_a.matched_with = request_b.id
+    request_a.status_changed_at = matched_at
+    request_b.status = RequestStatus.MATCHED
+    request_b.matched_with = request_a.id
+    request_b.status_changed_at = matched_at
+
+    assert store.save_pair_if_both_open(request_a, request_b) is True
+
+    assert store.get(request_a.id).status == RequestStatus.MATCHED
+    assert store.get(request_a.id).matched_with == request_b.id
+    assert store.get(request_b.id).status == RequestStatus.MATCHED
+    assert store.get(request_b.id).matched_with == request_a.id
+
+
+def test_save_pair_if_both_open_writes_neither_and_returns_false_when_either_is_not_open():
+    # The exact case this method exists for: one side (request_b) was
+    # already flipped away from OPEN by a different, real writer. A pair of
+    # separate save() calls would still blindly overwrite request_b's real
+    # status and would already have committed request_a's own write by the
+    # time anyone could notice -- this has to roll back *both* sides
+    # together, leaving request_a's stored row untouched too, not just
+    # refuse request_b's.
+    request_a = _sample_request("rider-save-pair-false-a")
+    request_b = _sample_request("rider-save-pair-false-b")
+    other = _sample_request("rider-save-pair-false-other")
+    store = RequestStore(make_session_factory())
+    store.add(request_a)
+    store.add(request_b)
+    store.add(other)
+
+    already_cancelled = RequestStore(make_session_factory()).get(request_b.id)
+    already_cancelled.status = RequestStatus.CANCELLED
+    already_cancelled.status_changed_at = datetime.utcnow()
+    RequestStore(make_session_factory()).save(already_cancelled)
+
+    # request_a/request_b are still the stale, pre-cancel, OPEN-looking
+    # local objects a caller would have mutated in place before writing.
+    matched_at = datetime.utcnow()
+    request_a.status = RequestStatus.MATCHED
+    request_a.matched_with = request_b.id
+    request_a.status_changed_at = matched_at
+    request_b.status = RequestStatus.MATCHED
+    request_b.matched_with = request_a.id
+    request_b.status_changed_at = matched_at
+
+    assert store.save_pair_if_both_open(request_a, request_b) is False
+
+    fetched_a = store.get(request_a.id)
+    assert fetched_a.status == RequestStatus.OPEN
+    assert fetched_a.matched_with is None
+    fetched_b = store.get(request_b.id)
+    assert fetched_b.status == RequestStatus.CANCELLED
+    assert fetched_b.matched_with is None
