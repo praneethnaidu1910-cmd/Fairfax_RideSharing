@@ -61,6 +61,53 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 54. Stop a wall-clock-dependent test from going from green to red on its own, with no code change in between
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run started the same way the last
+  several did: set up a venv, installed requirements, and ran the full
+  suite before going looking for a bug to fix. It didn't need to go
+  looking -- `pytest` itself came back red, for real, on the very first
+  run, no code change of mine involved at all.
+- The one failure was
+  `test_on_new_request_matches_a_recurring_rider_against_next_weeks_one_off_occurrence`,
+  task 48's own regression test for the "recurring schedule expands to a
+  date in the past" bug. That test pins `scoring.date.today()` to a fixed,
+  hardcoded Thursday (`_FixedDate`, 2026-11-19) via monkeypatch, so
+  `expand_schedule()`'s "next Monday" math always lands on the same fixed
+  calendar date (2026-11-23) instead of whatever Monday happens to be
+  upcoming on the day the suite actually runs -- exactly the point of
+  pinning it. But `on_new_request()` also calls `is_expired()`, which
+  reads `now` from `scoring.datetime.utcnow()` -- the real wall clock, not
+  patched by this test at all. For as long as the real date stayed before
+  2026-11-23, that real `now` was always earlier than the one_off_rider's
+  2026-11-23T09:20 window regardless, so the gap between "date pinned" and
+  "time not pinned" was invisible. It stopped being invisible the moment
+  the real date became 2026-11-23 itself: `is_expired()` started reading
+  the test's own one-off window as already expired, purely depending on
+  what time of day the suite happened to run, and `on_new_request()`
+  returned zero matches instead of one -- not a bug in the matching engine
+  or in task 48's own fix, just a test that pinned half of "now" and
+  trusted the other half to stay out of the way forever.
+- Fix: a new `_FixedDateTime(datetime)` in `tests/test_engine.py`, pinned
+  to the same Thursday `_FixedDate` already describes (2026-11-19) at a
+  fixed hour (08:00) well before the Monday window the test builds from
+  it, with its own `utcnow()` overridden the same way `_FixedDate.today()`
+  already is. The test now monkeypatches `scoring_module.datetime` to this
+  class alongside `scoring_module.date` -- freezing both halves of "now"
+  `on_new_request()` actually reads, so the test no longer depends on
+  either what day or what time of day it's actually run.
+- Didn't touch `app/matching/scoring.py`, `app/matching/engine.py`, or
+  task 48's own fix -- confirmed the regression was entirely in how this
+  one test pinned time, not in the production code it exercises, by
+  reading `expand_schedule()`/`is_expired()` fresh against this failure
+  before changing anything. Ran the full suite against the unmodified
+  test first to see it fail for real (`0 == 1`, the same
+  `assert len(matches) == 1` task 48's own entry describes), then again
+  after this fix to confirm it's deterministic now, not just incidentally
+  passing on today's particular date/time. Full suite: 206 tests, same
+  count as before (this fixes an existing test, it doesn't add one),
+  all green.
+
 ### 53. Close the match-commit race task 51 flagged but didn't fix, with an atomic pair write
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

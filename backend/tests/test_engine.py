@@ -24,6 +24,41 @@ class _FixedDate(date):
         return cls(2026, 11, 19)
 
 
+class _FixedDateTime(datetime):
+    """datetime.utcnow()'s counterpart to _FixedDate.today() just above --
+    pinned to the same Thursday, at a fixed hour well before the Monday
+    window the test below builds from it, so is_expired()'s own `now`
+    (read from the real wall clock via scoring.datetime.utcnow(), not from
+    scoring.date) can't silently drift past that window and read the
+    request as already expired out from under the test.
+
+    Pinning only scoring.date (not scoring.datetime) looked like enough at
+    first -- right up until the real wall clock actually caught up with
+    the Monday this test computes from _FixedDate's own hardcoded
+    Thursday. 2026-11-19 is a Thursday, so "next Monday" from it is always
+    2026-11-23, a fixed calendar date this test never moves. For as long
+    as the real date stayed before that, is_expired()'s real
+    datetime.utcnow() read was always earlier than the window regardless
+    of what scoring.date was patched to, so the gap was invisible.
+    Confirmed this was real, not theoretical, not by constructing a
+    scenario but by just running the existing suite for real on
+    2026-11-23 -- on_new_request() came back with zero matches instead of
+    one, because is_expired() saw a real `now` of 2026-11-23 against a
+    one_off_rider window ending 2026-11-23T09:20, and whether that read as
+    "already expired" depended on nothing but what time of day the suite
+    happened to run, not on anything this test was actually supposed to be
+    testing. Freezing scoring.datetime.utcnow() to the same Thursday
+    morning this test's own narrative already describes closes that gap
+    the same way _FixedDate closes it for scoring.date.today() -- the test
+    no longer depends on either what day or what time of day it actually
+    runs.
+    """
+
+    @classmethod
+    def utcnow(cls) -> datetime:
+        return cls(2026, 11, 19, 8, 0, 0)
+
+
 def _sample_copy() -> list[RideRequest]:
     # match_batch() mutates .status in place -- copy so other test modules
     # importing the shared SAMPLE_REQUESTS list aren't affected.
@@ -511,6 +546,7 @@ def test_on_new_request_matches_a_recurring_rider_against_next_weeks_one_off_occ
     # and scored 0.0 overlap. Pin "today" to that same Thursday here so
     # this doesn't depend on which real day the suite happens to run on.
     monkeypatch.setattr(scoring_module, "date", _FixedDate)
+    monkeypatch.setattr(scoring_module, "datetime", _FixedDateTime)
 
     origin = Location(lat=38.8462, lng=-77.3064)
     destination = Location(lat=38.9757, lng=-77.6122)
