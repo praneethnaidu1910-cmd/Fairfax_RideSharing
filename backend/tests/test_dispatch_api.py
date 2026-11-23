@@ -32,6 +32,25 @@ def test_match_rejects_physically_impossible_coordinates():
     assert response.status_code == 422
 
 
+def test_match_rejects_nan_coordinate_instead_of_crashing_the_response():
+    # Same bug tests/test_main.py covers for the pooling engine's own
+    # Location, through this module's own copy of the same Field(ge=..,
+    # le=..) shape: Python's json.loads() accepts the non-standard "NaN"
+    # token as a real float, which correctly fails this bound (any
+    # comparison against NaN is False) -- but before app/main.py's own
+    # RequestValidationError handler sanitized it, echoing that NaN back
+    # in the 422 body crashed Starlette's own JSONResponse (which renders
+    # with allow_nan=False) instead of ever reaching a caller as a 422.
+    response = client.post(
+        "/match",
+        content='{"rider_location": {"lat": NaN, "lng": -77.355}}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["input"] == "nan"
+
+
 def test_match_returns_404_when_no_drivers_available(monkeypatch):
     from app.dispatch.schemas import Driver, Location
 

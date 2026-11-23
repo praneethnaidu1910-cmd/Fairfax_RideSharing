@@ -1,11 +1,15 @@
 import asyncio
+import math
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
@@ -45,6 +49,59 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Ride-Pooling Matching Engine (Demo)", lifespan=lifespan)
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively replaces a NaN/+-Infinity float with its str() -- the
+    one thing FastAPI's own default RequestValidationError handler
+    doesn't do, which crashes the response for it rather than 422ing.
+
+    `Location.lat`/`lng` (here and in app/dispatch/schemas.py) already
+    reject an out-of-range coordinate with Field(ge=.., le=..) -- but
+    Python's own `json.loads()` (what Starlette's Request.json() uses to
+    parse the body) accepts the non-standard `NaN`/`Infinity`/`-Infinity`
+    tokens as valid float literals, unlike strict JSON. That value then
+    reaches pydantic as a real `float('nan')`, correctly fails the ge/le
+    check (any comparison against NaN is False, so it's never mistaken
+    for a valid number), and pydantic's own error object faithfully
+    echoes the bad value back as `error['input']` -- exactly what every
+    other validation error already does, so a caller can see what it
+    sent. The crash isn't in any of that: it's that FastAPI's default
+    handler builds the 422 body with `jsonable_encoder(exc.errors())`,
+    which leaves a NaN/Infinity float untouched (confirmed directly:
+    `jsonable_encoder(float('nan'))` returns right back `nan`, not a
+    string), and Starlette's JSONResponse renders with
+    `json.dumps(..., allow_nan=False)` -- deliberately strict, since a
+    literal NaN/Infinity isn't valid JSON for any other parser to read
+    back. Confirmed real, not theoretical, with a live TestClient call
+    before this fix: POST /requests with
+    `{"origin": {"lat": NaN, "lng": -77.3}, ...}` (valid Python-flavored
+    JSON, parses cleanly) 500'd -- not even a clean 500, the connection
+    itself reset mid-response, since the crash happened *while building*
+    the error response, after the status line may already have gone out.
+    POST /match (app/dispatch/router.py) hits the identical crash through
+    its own Location, since it has the same Field(ge=.., le=..) shape.
+    Sanitizing just the one thing that can't survive `allow_nan=False` --
+    recursively, since a nested model's error can bury the bad float
+    several levels into `error['input']`/`error['ctx']` -- turns this into
+    the same clean 422 every other bad coordinate already gets."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _json_safe(jsonable_encoder(exc.errors()))},
+    )
 
 
 def parse_allowed_origins(raw: str) -> list[str]:

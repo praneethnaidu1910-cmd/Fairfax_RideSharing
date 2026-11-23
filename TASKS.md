@@ -61,6 +61,76 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 55. Stop a NaN/Infinity coordinate from crashing the 422 response that was supposed to reject it
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found one in how FastAPI's own
+  default validation-error handler reports the exact bug tasks 23/24
+  already fixed once -- not in app/schemas.py's `Location` itself, which
+  is doing exactly what it's supposed to.
+- `Location.lat`/`lng` (here and in app/dispatch/schemas.py's own copy)
+  already range-check with `Field(ge=.., le=..)` -- tasks 23/24's own fix
+  for a client typo like `lat=999` silently feeding nonsense into the
+  distance/bearing math instead of 422ing. But Python's own `json.loads()`
+  -- what Starlette's `Request.json()` uses to parse every request body --
+  accepts the non-standard `NaN`/`Infinity`/`-Infinity` tokens as real
+  float literals, unlike strict JSON. That value reaches pydantic as an
+  actual `float('nan')`, correctly fails the `ge`/`le` check (any
+  comparison against NaN is False, so it's never mistaken for a valid
+  number -- same mechanism that already rejects `lat=999`), and pydantic's
+  own error object faithfully echoes the bad value back as
+  `error['input']`, exactly like it does for any other rejected value.
+  That's where it stopped being fine: FastAPI's default handler builds the
+  422 body with `jsonable_encoder(exc.errors())`, which leaves a
+  NaN/Infinity float completely untouched (confirmed directly --
+  `jsonable_encoder(float('nan'))` hands back `nan`, not a string), and
+  Starlette's `JSONResponse` renders that body with `json.dumps(...,
+  allow_nan=False)` -- deliberately strict, since a literal NaN/Infinity
+  isn't valid JSON for any other caller to read back. Confirmed real, not
+  theoretical, with a live TestClient call before writing any fix: `POST
+  /requests` with `{"origin": {"lat": NaN, "lng": -77.3}, ...}` (valid
+  Python-flavored JSON, parses cleanly, and lat correctly fails its own
+  bounds check) didn't 422 at all -- it 500'd, and running the same thing
+  against a real raw socket reset the connection outright, since the crash
+  happened *while building* the error response itself. `POST /match`
+  (app/dispatch/router.py) hits the identical crash through its own
+  `Location`, since it has the same `Field(ge=.., le=..)` shape with
+  nothing dispatch-specific about the bug.
+- Fix: a new `app.main._json_safe()` and a `RequestValidationError`
+  exception handler registered on the app that uses it -- recursively
+  replaces any NaN/+-Infinity float anywhere in the error payload (not
+  just at the top level: a nested model's error can bury the bad float
+  several levels into `error['input']`/`error['ctx']`) with its own
+  `str()` (`"nan"`/`"inf"`/`"-inf"`), then builds the exact same 422
+  `{"detail": [...]}` shape FastAPI's own default handler already builds
+  for every other validation error -- ordinary out-of-range values like
+  `lat=999` are untouched by this (`_json_safe` only ever touches a
+  non-finite float, nothing else), so every existing 422 keeps its exact
+  same body. Deliberately didn't touch `Location` itself or add a
+  NaN-specific validator there -- the bug was never in which values
+  `Location` accepts (it was already correctly rejecting NaN/Infinity
+  before this fix, same as `lat=999`), it was in the one path that reports
+  *any* rejection crashing specifically when the rejected value happens to
+  be NaN/Infinity, which is a FastAPI/Starlette response-building concern,
+  not a schema one -- and the same fix, applied once at the app level,
+  closes it for both this module's `Location` and the dispatch module's
+  own separate copy without duplicating anything in either.
+- Tests: new `tests/test_main.py` adds `test_json_safe_leaves_ordinary_
+  values_untouched` and `test_json_safe_replaces_nan_and_infinity_with_
+  their_str_at_any_depth` directly against the new helper, plus
+  `test_create_request_rejects_a_nan_coordinate_instead_of_crashing_the_
+  response` and `test_create_request_rejects_an_infinite_coordinate_
+  instead_of_crashing_the_response`, the real end-to-end reproductions
+  above through `POST /requests`. `tests/test_dispatch_api.py` adds
+  `test_match_rejects_nan_coordinate_instead_of_crashing_the_response`,
+  the same reproduction through `POST /match`. Ran all of these against
+  the pre-fix code first (temporarily stashing just `app/main.py`) to
+  confirm they actually fail there -- `test_main.py` fails to even import
+  (`_json_safe` doesn't exist pre-fix at all) and the dispatch test
+  reproduces the real `ValueError: Out of range float values are not JSON
+  compliant` from inside Starlette's own response rendering, not just that
+  they pass now. Full suite: 211 tests, up from 206, all green.
+
 ### 54. Stop a wall-clock-dependent test from going from green to red on its own, with no code change in between
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run started the same way the last
