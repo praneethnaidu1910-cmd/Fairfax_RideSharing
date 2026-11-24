@@ -162,6 +162,36 @@ class RecurringSchedule(BaseModel):
             raise ValueError("recurring schedule needs at least one weekday")
         if any(day < 0 or day > 6 for day in self.weekdays):
             raise ValueError("weekdays must be 0 (Monday) through 6 (Sunday)")
+        # `weekdays` means "which days of the week," a set of at most 7
+        # distinct values (0-6) -- nothing above rejected a *repeated* one,
+        # so a payload could carry an arbitrarily long list of duplicates
+        # (e.g. weekdays=[0]*20000) and validate cleanly, since every
+        # individual value is still in range. That's not just a wasted
+        # payload: app/matching/scoring.py's expand_schedule() materializes
+        # one OneOffSchedule instance per entry in this list (duplicates
+        # included), and both match_batch() and on_new_request() then score
+        # every one of those windows against every window on the other side
+        # of a candidate pair -- so the cost of scoring this request against
+        # anything else scales linearly with how many duplicates it was
+        # posted with, not with how many distinct days it actually
+        # represents. And because a RecurringSchedule never expires
+        # (scoring.is_expired() always returns False for one) and
+        # can_ever_be_matched() only looks at seat count, a small-enough
+        # seats_needed keeps a request like this sitting in the live
+        # matching pool -- repeatedly re-scored against every future
+        # candidate that happens to bucket near it -- for as long as the
+        # process runs. Confirmed this was real, not theoretical, with a
+        # live script before this fix: pooling one such request
+        # (weekdays=[0]*20000) and then submitting one ordinary, otherwise-
+        # compatible request next to it made that single on_new_request()
+        # call take ~180ms, versus a sub-millisecond ordinary match --
+        # reachable through a single, ordinary-looking POST /requests call,
+        # no auth required (SCOPE.md: open-join, no SMS/OTP). Rejecting a
+        # repeated weekday here closes it at the source: a valid `weekdays`
+        # can now never exceed 7 entries, since there are only 7 distinct
+        # values 0-6 to begin with.
+        if len(self.weekdays) != len(set(self.weekdays)):
+            raise ValueError("weekdays must not contain duplicates")
         # Same gap as OneOffSchedule._check_window above, just on a bare
         # `time` instead of a `datetime` -- "09:00:00-05:00" parses to a
         # tz-aware time, and comparing it against a naive one below is the

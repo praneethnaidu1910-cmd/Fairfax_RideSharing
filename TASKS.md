@@ -61,6 +61,59 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 56. Reject a repeated weekday on a recurring schedule instead of letting it multiply matching cost per duplicate
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found one in
+  `app/schemas.py`'s `RecurringSchedule` -- a missing validation gap with a
+  real resource-exhaustion shape, not a crash/race/leak the way most of
+  the last several entries here were.
+- `RecurringSchedule.weekdays` means "which days of the week" -- a set of
+  at most 7 distinct values, Monday=0 through Sunday=6. The existing
+  validator already rejected an out-of-range value (`weekdays=[7]`) and an
+  empty list, but nothing stopped a value from *repeating* -- every
+  individual entry in `weekdays=[0, 0, 0, ...]` is still in range, so that
+  sailed through cleanly. That's not just a wasted payload:
+  `app/matching/scoring.py`'s `expand_schedule()` materializes one
+  `OneOffSchedule` instance per entry in this list, duplicates included,
+  and both `match_batch()` and `on_new_request()` then score *every one of
+  those windows* against every window on the other side of a candidate
+  pair -- so the cost of scoring this one request against anything else
+  scales linearly with how many duplicates it was posted with, not with
+  how many distinct days it actually represents. Confirmed this was real,
+  not theoretical, with a live script before writing any fix: pooling one
+  request with `weekdays=[0]*20000` (a single, ordinary-looking
+  `POST /requests`, no auth required -- SCOPE.md: open-join, no SMS/OTP)
+  and then submitting one unrelated, otherwise-compatible request next to
+  it took `on_new_request()` from sub-millisecond to ~180ms for that one
+  call alone. And because a `RecurringSchedule` never expires
+  (`scoring.is_expired()` always returns `False` for one) and
+  `can_ever_be_matched()` only looks at seat count, a small enough
+  `seats_needed` keeps a request shaped like this sitting in the live
+  matching pool, repeatedly re-scored against every future candidate that
+  happens to bucket near it, for as long as the process runs -- a real,
+  single-POST way to make every subsequent nearby match slower, not a
+  contrived one.
+- Fix: `RecurringSchedule._check_weekdays_and_window()` now also rejects
+  `len(self.weekdays) != len(set(self.weekdays))` -- a repeated weekday is
+  meaningless on its own terms (two "Mondays" produce two identical
+  expanded windows, not two different ones), so rejecting it isn't
+  inventing a new product rule, it's enforcing what `weekdays` already
+  claims to represent. This also naturally caps a valid `weekdays` at 7
+  entries, since there are only 7 distinct values (0-6) to begin with --
+  closing the resource-exhaustion shape at the source instead of picking
+  an arbitrary length limit.
+- Tests: `tests/test_schemas.py` adds
+  `test_recurring_schedule_rejects_duplicate_weekdays`, directly against
+  `RecurringSchedule`. `tests/test_requests_api.py` adds
+  `test_create_request_rejects_a_recurring_schedule_with_duplicate_weekdays`,
+  the real `POST /requests` reproduction (a small, 3-element duplicate
+  list, not the 20000-element one used to measure the actual cost above).
+  Ran both against the pre-fix code first (temporarily stashing just
+  `app/schemas.py`) to confirm they actually fail there -- a real `201`
+  instead of `422`, not just that they pass now. Full suite: 213 tests, up
+  from 211, all green.
+
 ### 55. Stop a NaN/Infinity coordinate from crashing the 422 response that was supposed to reject it
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

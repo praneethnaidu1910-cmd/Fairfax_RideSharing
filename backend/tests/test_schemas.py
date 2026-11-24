@@ -118,6 +118,27 @@ def test_recurring_schedule_rejects_empty_weekdays():
         )
 
 
+def test_recurring_schedule_rejects_duplicate_weekdays():
+    # `weekdays` means "which days of the week" -- a set of at most 7
+    # distinct values (0-6) -- but nothing stopped a value from repeating
+    # before this fix, even though every individual value was still in
+    # range. app/matching/scoring.py's expand_schedule() materializes one
+    # OneOffSchedule per entry in this list, duplicates included, and both
+    # match_batch() and on_new_request() score every one of those windows
+    # against every candidate window -- so a long enough run of duplicates
+    # (confirmed live: weekdays=[0]*20000 took on_new_request() from
+    # sub-millisecond to ~180ms scoring a single ordinary request next to
+    # it) is a real, single-POST resource-exhaustion vector, not just a
+    # wasted payload, since a RecurringSchedule like this never expires and
+    # stays in the live matching pool for as long as the process runs.
+    with pytest.raises(ValidationError):
+        RecurringSchedule(
+            weekdays=[0, 0],
+            earliest_departure_time=time(9, 0),
+            latest_departure_time=time(9, 30),
+        )
+
+
 def test_ride_request_create_rejects_a_schedule_mixing_one_off_and_recurring_fields():
     # `schedule` is `Union[OneOffSchedule, RecurringSchedule]` with no
     # discriminator -- before extra="forbid", a dict carrying fields from

@@ -72,6 +72,37 @@ def test_create_request_rejects_impossible_coordinates():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_a_recurring_schedule_with_duplicate_weekdays():
+    # app/schemas.py's RecurringSchedule now rejects a repeated weekday --
+    # before this, a client could post an arbitrarily long list of
+    # duplicates (e.g. weekdays=[0]*20000) and it validated cleanly, since
+    # every individual value was still 0-6. That's not just a wasted
+    # payload: app/matching/scoring.py's expand_schedule() materializes one
+    # OneOffSchedule per entry, duplicates included, and the engine scores
+    # every one of those windows against every candidate window it's ever
+    # bucketed near -- for as long as the process runs, since a
+    # RecurringSchedule never expires. This reproduces the exact POST that
+    # used to 201 and silently pool a request whose per-match scoring cost
+    # scaled with how many duplicates it was posted with.
+    payload = {
+        "rider_id": "rider-duplicate-weekdays",
+        "origin": {"lat": FAIRFAX[0], "lng": FAIRFAX[1]},
+        "destination": {"lat": ALDIE[0], "lng": ALDIE[1]},
+        "schedule": {
+            "weekdays": [0, 0, 0],
+            "earliest_departure_time": "09:00:00",
+            "latest_departure_time": "09:30:00",
+        },
+        "seats_needed": 1,
+        "contact": "555-0000",
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_create_request_rejects_timezone_aware_departure_times():
     # app/schemas.py's OneOffSchedule now rejects a tz-aware
     # earliest_departure/latest_departure -- before this, a perfectly
