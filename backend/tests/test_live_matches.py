@@ -7,6 +7,7 @@ reveal once a request is matched. The client-side WebSocket wiring itself
 (static/live.js) is what the manual smoke test in the README verifies.
 """
 
+import time
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -169,6 +170,48 @@ def test_a_connection_that_never_registers_is_closed_after_a_timeout_not_left_ha
             assert not engine._subscribers
     finally:
         router_module.REGISTRATION_TIMEOUT_SECONDS = original_timeout
+
+
+def test_a_connection_that_disconnects_after_registering_is_unsubscribed_even_without_a_later_match():
+    """Regression test for a real resource leak in this exact route, the
+    sibling of the "never registers" leak the test above already covers --
+    this one's about what happens *after* registration, once the only
+    loop left is `await queue.get()`, which never calls receive() again.
+    An ASGI server (uvicorn) doesn't cancel the app's task just because
+    the underlying TCP connection dropped -- it delivers a
+    `websocket.disconnect` message the next time the app actually calls
+    receive(), and before this fix nothing here ever did that again after
+    registering. Confirmed real against a real uvicorn server (not just
+    this test's own TestClient, which cancels the server-side task
+    outright when its own `with` block exits -- not representative of a
+    real dropped connection): a raw socket that completed the handshake,
+    registered, then had its TCP connection aborted with no close
+    handshake at all left `engine._subscribers` holding that connection's
+    queue indefinitely, with no later match for its id ever arriving to
+    clean it up the old way (via send_json() finally failing on the dead
+    socket).
+
+    Reproduces the same shape here without a second real socket: sends
+    the raw ASGI `websocket.disconnect` message this connection's own
+    receive() would get from a real dropped connection, *while still
+    inside* the `with` block (not via it exiting, which would cancel the
+    server task directly and mask this exact bug) -- then polls
+    `engine._subscribers` briefly, since crossing from this synchronous
+    test into the server's own async task is inherently a race against
+    its next scheduling tick, not something a fixed sleep could time
+    reliably either way.
+    """
+    with TestClient(app) as client:
+        engine = app.state.engine
+        with client.websocket_connect("/matches") as websocket:
+            websocket.send_json({"request_id": str(uuid4())})
+            websocket.send({"type": "websocket.disconnect", "code": 1000})
+
+            deadline = time.monotonic() + 2.0
+            while engine._subscribers and time.monotonic() < deadline:
+                time.sleep(0.02)
+
+            assert not engine._subscribers
 
 
 def test_mine_page_shows_waiting_before_match_and_reveal_after():

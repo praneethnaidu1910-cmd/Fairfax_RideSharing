@@ -61,6 +61,66 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 57. Stop a /matches connection that disconnects after registering from leaking its subscriber slot forever
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found the sibling of a leak I'd
+  already closed once in this exact route (`stream_matches()`,
+  `app/router.py`) -- that fix covered a connection that never registers at
+  all; this one's about every connection that does register and then
+  genuinely goes away.
+- Once a connection registers, the only thing left running was
+  `while True: match = await queue.get()` -- it never calls
+  `websocket.receive()` again for the rest of the connection's life, and
+  `app/static/live.js` never sends a second message anyway. That's exactly
+  how an ASGI server like uvicorn finds out a client disconnected: it
+  delivers the `websocket.disconnect` message the *next* time the app
+  calls `receive()` -- it doesn't cancel the app's own task on its own just
+  because the underlying TCP connection dropped. So a connection that
+  closes the tab, loses network, or (the ordinary case once it's already
+  matched) just navigates away from `/mine/<id>` never calls `receive()`
+  again here, that disconnect message never gets read, and this loop sits
+  in `queue.get()` forever -- still in `engine._subscribers`, still handed
+  a `put()` for every future match anyone else makes, for as long as the
+  process runs, exactly the kind of thing SCOPE.md's real ~1,000-person
+  deployment would hit constantly (most riders either never match before
+  closing the tab, or close it right after matching -- either way nothing
+  ever arrives afterward to clean them up the old way). Confirmed this was
+  real, not theoretical, with a live script against a *real* uvicorn
+  server, not just this suite's own TestClient -- TestClient cancels the
+  server-side task directly when its own `with` block exits, which isn't
+  how a real dropped connection behaves and would have hidden this bug
+  completely: opened a raw socket, completed the WebSocket handshake and
+  sent a real registration message by hand, then aborted the TCP
+  connection outright (no close handshake, same as a lost network or a
+  killed browser tab) -- `engine._subscribers` still held that
+  connection's queue, unchanged, for as long as the server kept running
+  afterward with no later match for its id ever arriving.
+- Fix: a second task, `_watch_for_disconnect()`, now runs alongside the
+  match-forwarding loop (renamed `_forward_matches()`) for the rest of the
+  connection's life, doing nothing but calling `receive()` in a loop so a
+  real disconnect is actually noticed the moment it happens instead of
+  only if a match happens to arrive afterward. `asyncio.wait(...,
+  return_when=FIRST_COMPLETED)` races the two; whichever finishes first
+  (a real disconnect, or -- on correctly-behaving code -- nothing, since
+  match-forwarding runs forever) causes the other to be cancelled, and the
+  same `finally: engine.unsubscribe(queue)` as before always runs.
+- Tests: `tests/test_live_matches.py` adds
+  `test_a_connection_that_disconnects_after_registering_is_unsubscribed_even_without_a_later_match`
+  -- reproduces the same shape without a second real socket by sending the
+  raw ASGI `websocket.disconnect` message this connection's own `receive()`
+  would get from a real dropped connection, *while still inside* the
+  `with` block (not via it exiting, which would cancel the server task
+  directly and mask this exact bug the same way it would have hidden the
+  live-uvicorn repro above), then polls `engine._subscribers` briefly
+  rather than a fixed sleep, since crossing from synchronous test code
+  into the server's own background async task is inherently a race
+  against its next scheduling tick. Ran it against the pre-fix code first
+  (temporarily stashing just `app/router.py`) to confirm it actually fails
+  there -- `engine._subscribers` still held the leaked queue after the
+  full 2-second poll window, not just that it passes now. Full suite: 214
+  tests, up from 213, all green.
+
 ### 56. Reject a repeated weekday on a recurring schedule instead of letting it multiply matching cost per duplicate
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

@@ -308,6 +308,46 @@ async def stream_matches(websocket: WebSocket) -> None:
     piled up in that connection's own queue (`qsize() == 3`), and the
     connection itself was still sitting in `engine._subscribers`, neither
     of which a correctly-behaving connection should ever accumulate.
+
+    The timeout above only ever covers the registration wait. Once past
+    it, this used to be a single `while True: match = await queue.get()`
+    loop -- which never calls `websocket.receive()` again for the rest of
+    the connection's life, and app/static/live.js never sends a second
+    message anyway. That's exactly how an ASGI server like uvicorn learns
+    a client actually disconnected: it delivers a `websocket.disconnect`
+    message the *next* time the app calls `receive()`, it doesn't cancel
+    the app's task on its own just because the underlying TCP connection
+    dropped. A connection that registers and then genuinely goes away --
+    the rider closes the tab, loses network, or (the common case once
+    they've already matched) just navigates off `/mine/<id>` -- never
+    calls receive() again on this endpoint, so that disconnect message
+    never gets read, and this loop sits in `queue.get()` forever: still in
+    `engine._subscribers`, still handed a `put()` for every future match
+    anyone else makes (`run_forever()` iterates every subscriber for every
+    match), for as long as the process runs. The only thing that ever
+    cleaned one of these up before this fix was a match actually landing
+    for that exact connection's own registered id afterward -- at which
+    point `send_json()` on the now-dead socket finally raised and this
+    function's own `finally` ran -- but that's the rare case, not the
+    common one: most connections close either before ever matching, or
+    right after (nothing else will ever match that id again). Confirmed
+    real, not theoretical, with a live script against a real uvicorn
+    server (not just this suite's TestClient, which cancels the server
+    task outright on its own `with` block's exit -- not representative of
+    how a real ASGI server handles a dropped connection): opened a raw
+    socket, completed the WebSocket handshake and registration by hand,
+    then aborted the TCP connection with no close handshake at all (same
+    as a lost network or a killed browser tab) -- `engine._subscribers`
+    still held that connection's queue, unchanged, for as long as the
+    server kept running afterward with no further match for its id.
+    Fix: a second task (`_watch_for_disconnect`) runs alongside the match-
+    forwarding loop for the rest of the connection's life, doing nothing
+    but calling `receive()` in a loop so a real disconnect is actually
+    noticed the moment it happens, not only if a match happens to arrive
+    afterward. Whichever of the two finishes first -- a real disconnect,
+    or (on correctly-behaving code) nothing, since match-forwarding runs
+    forever -- the other is cancelled and this function returns, running
+    the same `finally: engine.unsubscribe(queue)` as before.
     """
     await websocket.accept()
     engine = websocket.app.state.engine
@@ -327,11 +367,42 @@ async def stream_matches(websocket: WebSocket) -> None:
             await websocket.close(code=1008)
             return
 
-        while True:
-            match = await queue.get()
-            if my_request_id in match.request_ids:
-                await websocket.send_json(match.model_dump(mode="json"))
-    except WebSocketDisconnect:
-        pass
+        async def _forward_matches() -> None:
+            while True:
+                match = await queue.get()
+                if my_request_id in match.request_ids:
+                    await websocket.send_json(match.model_dump(mode="json"))
+
+        async def _watch_for_disconnect() -> None:
+            # app/static/live.js never sends a second message after
+            # registration, so nothing here is ever acted on except the
+            # one message that actually matters: the ASGI disconnect
+            # notification that only ever arrives on the *next* receive()
+            # call -- see this function's own docstring for why nothing
+            # else here ever triggers that on its own.
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    raise WebSocketDisconnect(message.get("code", 1000), message.get("reason"))
+
+        forward_task = asyncio.ensure_future(_forward_matches())
+        disconnect_task = asyncio.ensure_future(_watch_for_disconnect())
+        try:
+            await asyncio.wait(
+                {forward_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            forward_task.cancel()
+            disconnect_task.cancel()
+            for task in (forward_task, disconnect_task):
+                try:
+                    await task
+                except (Exception, asyncio.CancelledError):
+                    # Either side can end with an exception on the way
+                    # out -- a real disconnect, send_json() failing on a
+                    # socket that's already gone, or our own cancel()
+                    # above -- none of which is this function's job to
+                    # report; cleanup is the finally block below.
+                    pass
     finally:
         engine.unsubscribe(queue)
