@@ -286,12 +286,48 @@ def test_ride_request_create_rejects_whitespace_only_rider_id_or_contact(field, 
         RideRequestCreate(**_create_payload(**{field: blank}))
 
 
+@pytest.mark.parametrize("field", ["rider_id", "contact"])
+@pytest.mark.parametrize(
+    "invisible",
+    [
+        "​​​",  # zero-width space, x3
+        "﻿",  # BOM / zero-width no-break space
+        "‌‍",  # zero-width non-joiner + joiner
+        " ​ ",  # a real space on each side, invisible in between
+    ],
+)
+def test_ride_request_create_rejects_a_rider_id_or_contact_made_only_of_invisible_characters(
+    field, invisible
+):
+    # str.strip() only recognizes whitespace -- a Unicode "format"
+    # character like a zero-width space or the BOM isn't whitespace as
+    # far as Python is concerned, so none of these were caught by the
+    # whitespace-only fix just above. Every one of them is specifically
+    # designed to render as nothing, though, so a rider_id/contact made up
+    # of only these is exactly as blank to the matched counterpart's
+    # reveal as "   " already is -- just invisible instead of using
+    # spaces. Confirmed this was real, not theoretical: this exact payload
+    # validated cleanly and a live POST /requests with it returned a real
+    # 201 before this fix.
+    with pytest.raises(ValidationError):
+        RideRequestCreate(**_create_payload(**{field: invisible}))
+
+
 def test_ride_request_create_keeps_incidental_surrounding_whitespace_on_a_real_value():
     # The fix rejects blank-after-stripping input, but doesn't itself
     # strip a value that has real content -- "John" typed with a stray
     # leading/trailing space is still "John", not an error.
     req = RideRequestCreate(**_create_payload(rider_id=" John "))
     assert req.rider_id == " John "
+
+
+def test_ride_request_create_keeps_a_real_value_with_an_incidental_invisible_character():
+    # Same reasoning as the whitespace test above, one level stricter:
+    # a real name that happens to carry a stray zero-width character isn't
+    # "made up of only invisible characters" -- it still has real, visible
+    # content, so it's left alone rather than rejected or normalized.
+    req = RideRequestCreate(**_create_payload(rider_id="J​ohn"))
+    assert req.rider_id == "J​ohn"
 
 
 @pytest.mark.parametrize("field", ["rider_id", "contact"])

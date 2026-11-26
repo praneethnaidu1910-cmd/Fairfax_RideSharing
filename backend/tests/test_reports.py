@@ -127,6 +127,24 @@ def test_post_report_with_whitespace_only_reason_is_rejected():
     assert _row_count(make_session_factory(), created["id"]) == 0
 
 
+def test_post_report_with_a_reason_made_only_of_invisible_characters_is_rejected():
+    # Same gap as app/schemas.py's RideRequestCreate fields (rider_id/
+    # contact) -- a reason made up of only zero-width/invisible Unicode
+    # characters isn't whitespace as far as str.strip() is concerned, so
+    # it sailed past the whitespace-only fix just above even though it's
+    # exactly as useless as "   " once anyone actually reads this report.
+    payload = _one_off_payload("rider-report-invisible-reason", contact="555-0607")
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        response = client.post(
+            f"/requests/{created['id']}/report", json={"reason": "​﻿"}
+        )
+
+    assert response.status_code == 422
+    assert _row_count(make_session_factory(), created["id"]) == 0
+
+
 def test_post_report_with_a_nul_character_in_reason_is_rejected():
     # Same gap as app/schemas.py's RideRequestCreate fields (rider_id/
     # contact): a NUL byte is neither empty nor whitespace, so it passed

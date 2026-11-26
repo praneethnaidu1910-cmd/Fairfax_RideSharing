@@ -61,6 +61,64 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 58. Reject a rider_id/contact/report-reason made up of only invisible Unicode characters, not just whitespace
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found a narrower sibling of tasks
+  26/27's own "whitespace-only" fix in `app/schemas.py`'s `_reject_blank()` --
+  same purpose, same shape of gap, just a different kind of input that looks
+  blank to a person without being blank to `str.strip()`.
+- `_reject_blank()` already rejects the empty string and a whitespace-only
+  one (" ", "\t\n ") for `rider_id`/`contact`/an abuse report's `reason` --
+  every field whose whole point is reaching or informing a real person. But
+  `str.strip()` only recognizes actual whitespace; it leaves a Unicode
+  "format" character (category Cf) completely alone, and that category is
+  exactly the zero-width/invisible characters a real client can type or
+  paste without anyone noticing: zero-width space (U+200B), zero-width
+  joiner/non-joiner, the BOM/zero-width-no-break-space (U+FEFF), the
+  left-to-right/right-to-left marks. None of those render as anything, so a
+  `rider_id`/`contact` made up of only them is exactly as blank to the
+  matched counterpart's reveal ("Matched! Your ride partner, :" / a blank
+  Contact line -- the precise gap task 26 first closed) as "   " already
+  is, just invisible instead of using spaces. Confirmed this was real, not
+  theoretical, with a live `TestClient` call before writing any fix: `POST
+  /requests` with `rider_id="​​​"` and
+  `contact="﻿‌"` validated cleanly through `_reject_blank()`
+  (`value.strip()` doesn't touch either character) and returned a real
+  `201`, not the `422` this function's whole job is to produce for exactly
+  this shape of input.
+- Fix: `_reject_blank()` now rejects a value where *every* character is
+  either whitespace or Unicode category Cf, instead of checking
+  `not value.strip()` alone -- this subsumes the existing empty/
+  whitespace-only cases (an empty string trivially satisfies "every
+  character is X" with zero characters to check) while also catching a
+  value that's only invisible format characters, or a mix of both
+  (" ​ "). Deliberately narrow: doesn't touch a Unicode letter that
+  happens to render with no visible glyph in some fonts (e.g. Hangul filler,
+  category Lo, a real letter rather than a format-control character) --
+  category Cf is specifically "characters designed to be invisible," the
+  same class of trick as the zero-width/BOM tokens actually confirmed above,
+  not a broader judgment call about what counts as a "real" character. Still
+  doesn't strip or normalize the value itself -- a real value that merely
+  *contains* an incidental invisible character alongside real content (e.g.
+  a stray zero-width space pasted into the middle of a name) is left
+  exactly as typed, same as this function's existing stance on incidental
+  whitespace.
+- Tests: `tests/test_schemas.py` adds
+  `test_ride_request_create_rejects_a_rider_id_or_contact_made_only_of_invisible_characters`
+  (four invisible-only payloads, both fields) and
+  `test_ride_request_create_keeps_a_real_value_with_an_incidental_invisible_character`
+  (a real value with one incidental invisible character isn't over-rejected).
+  `tests/test_requests_api.py` adds
+  `test_create_request_rejects_a_rider_id_or_contact_made_only_of_invisible_characters`,
+  the real `POST /requests` reproduction above. `tests/test_reports.py` adds
+  `test_post_report_with_a_reason_made_only_of_invisible_characters_is_rejected`,
+  the same shape through `POST /requests/{id}/report`. Ran all four against
+  the pre-fix code first (temporarily stashing just `app/schemas.py`) to
+  confirm they actually fail there -- a real `201` instead of `422` on all
+  of them, not just that they pass now. Full suite: 225 tests, up from 214,
+  all green.
+
 ### 57. Stop a /matches connection that disconnects after registering from leaking its subscriber slot forever
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the

@@ -209,6 +209,28 @@ def test_create_request_rejects_whitespace_only_rider_id_or_contact():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_a_rider_id_or_contact_made_only_of_invisible_characters():
+    # str.strip() only recognizes actual whitespace -- a Unicode "format"
+    # character like a zero-width space (U+200B) or the BOM (U+FEFF)
+    # isn't whitespace as far as Python's str is concerned, so neither the
+    # empty-string nor the whitespace-only fix above ever caught this.
+    # Every one of these characters is specifically designed to render as
+    # nothing, though, so a rider_id/contact made up of only them looks
+    # exactly as blank to the matched counterpart's reveal as "   " does.
+    # Confirmed this was real, not theoretical, with a live TestClient
+    # call before this fix: this exact payload returned a real 201, not a
+    # 422 -- value.strip() left both fields untouched, so neither looked
+    # blank to the check that was supposed to catch this.
+    payload = _one_off_payload(
+        "​​​", FAIRFAX, ALDIE, 120, 30, contact="﻿‌"
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_create_request_rejects_a_nul_character_in_rider_id_or_contact():
     # A NUL byte ("\u0000") is a perfectly ordinary JSON string character
     # -- neither empty nor whitespace, so neither fix above catches it --

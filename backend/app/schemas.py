@@ -1,3 +1,4 @@
+import unicodedata
 from datetime import datetime, time
 from enum import Enum
 from typing import Annotated, Optional, Union
@@ -18,9 +19,26 @@ def _reject_blank(value: str) -> str:
     the Field(min_length=1) fix, defeating the same purpose that fix
     closed. Doesn't strip the value -- a legitimately non-blank string
     with incidental leading/trailing whitespace (" John ") is left as the
-    rider typed it, not normalized."""
-    if not value.strip():
-        raise ValueError("must not be empty or whitespace-only")
+    rider typed it, not normalized.
+
+    `str.strip()` only recognizes whitespace -- it leaves a Unicode
+    "format" character (category Cf: zero-width space U+200B, zero-width
+    joiner/non-joiner, the BOM/zero-width-no-break-space U+FEFF, the
+    left-to-right/right-to-left marks, ...) completely alone, since none
+    of those are whitespace as far as Python's str is concerned. Every one
+    of them is specifically designed to render as nothing, though, so a
+    rider_id/contact/report-reason made up of nothing but them is exactly
+    as blank to anyone who ever looks at it -- the matched counterpart's
+    reveal, the abuse-report log -- as the empty or whitespace-only string
+    this function already rejects, just invisible instead of using actual
+    spaces. Confirmed this was real, not theoretical, with a live
+    TestClient call before this fix: POST /requests with
+    rider_id="\\u200b\\u200b\\u200b" (three zero-width spaces) and
+    contact="\\ufeff\\u200c" validated cleanly and returned a real 201 --
+    `value.strip()` doesn't remove either character, so neither looked
+    blank to this check, even though both display as nothing."""
+    if all(character.isspace() or unicodedata.category(character) == "Cf" for character in value):
+        raise ValueError("must not be empty, whitespace-only, or made up of invisible characters")
     return value
 
 
