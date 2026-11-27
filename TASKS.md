@@ -61,6 +61,69 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 59. Cap rider_id/contact/report-reason length so one POST can't bloat every future GET /requests response
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did, and found the missing ceiling on the
+  exact fields task 58 (and 26/27 before it) already put a floor on --
+  `app/schemas.py`'s `NonBlankStr`, shared by `RideRequestCreate.rider_id`,
+  `.contact`, and `AbuseReportCreate.reason`.
+- `Field(min_length=1)` plus `_reject_blank`/`_reject_nul` already stop
+  these fields from being empty, whitespace-only, invisible-characters-
+  only, or carrying a NUL byte -- but nothing anywhere put a *ceiling* on
+  how long one can be. `app/models.py`'s backing columns are a plain
+  SQLAlchemy `String` with no length, which Postgres stores as an
+  unbounded `VARCHAR` without complaint, so there was no DB-level limit to
+  lean on either -- unlike `seats_needed`'s own `MAX_SEATS_NEEDED` fix,
+  which closes a real Postgres INTEGER column limit, there was nothing
+  here to hit a wall on at all. Confirmed this was real, not theoretical,
+  with a live `TestClient` call before writing any fix: `POST /requests`
+  with a 50,000-character `rider_id` and `contact` (one ordinary-shaped,
+  unauthenticated POST -- SCOPE.md: open-join, no SMS/OTP) validated
+  cleanly and came back a real `201`, and the very next `GET /requests` --
+  the open list every anonymous caller/browser polls -- came back as a
+  5MB+ response, just from that one row. That's not a one-time cost: it's
+  paid by every caller of that public list for as long as the request
+  stays open, which is indefinite for a recurring request
+  (docs/MATCHING_ALGORITHM.md's "Request lifecycle" section: a
+  `RecurringSchedule` never expires on its own). The same gap reached
+  `AbuseReportCreate.reason` through `POST /requests/{id}/report`, since it
+  shares the same `NonBlankStr` type. Same "one reachable POST degrades
+  everyone else" shape as task 56's duplicate-weekday fix and task 50/55's
+  datetime-range fixes already in this log, just on string length instead
+  of list length or a datetime bound.
+- Fix: a new `MAX_TEXT_FIELD_LENGTH = 500` and `max_length=
+  MAX_TEXT_FIELD_LENGTH` added to `NonBlankStr`'s existing `Field(...)`.
+  SCOPE.md never states a number for this, the same situation
+  `app/retention.py`'s `RETENTION_DAYS` is already in, so 500 is my own
+  reasonable default -- comfortable room for a real name, a phone number
+  or WhatsApp handle, or a genuinely detailed abuse-report paragraph,
+  several times over -- not a hard system limit the way `MAX_SEATS_NEEDED`
+  is. Worth revisiting if a real policy is ever set. Deliberately left
+  `RideRequest.rider_id`/`.contact` (the stored/internal shape) and
+  `AbuseReport.reason` untouched -- same reasoning task 58's own fix
+  already gives for why those aren't `NonBlankStr`-typed: `RideRequest`
+  also has to represent an already-stored row, and by the time either
+  shape is ever constructed, intake (`RideRequestCreate`/
+  `AbuseReportCreate`) has already enforced the ceiling.
+- Tests: `tests/test_schemas.py` adds
+  `test_ride_request_create_rejects_a_rider_id_or_contact_past_the_length_ceiling`
+  and
+  `test_ride_request_create_keeps_a_rider_id_or_contact_exactly_at_the_length_ceiling`
+  (the boundary itself, both fields) directly against `RideRequestCreate`.
+  `tests/test_requests_api.py` adds
+  `test_create_request_rejects_a_rider_id_or_contact_past_the_length_ceiling`,
+  the real `POST /requests` reproduction above (50,000-character fields).
+  `tests/test_reports.py` adds
+  `test_post_report_with_a_reason_past_the_length_ceiling_is_rejected`, the
+  same shape through `POST /requests/{id}/report`. Ran the three HTTP-level
+  reproductions against the pre-fix code first (temporarily stashing just
+  `app/schemas.py`) to confirm they actually fail there -- a real `201`
+  instead of `422` on both, not just that they pass now; the two
+  `test_schemas.py` tests fail to even import pre-fix, since
+  `MAX_TEXT_FIELD_LENGTH` doesn't exist yet. Full suite: 231 tests, up from
+  225, all green.
+
 ### 58. Reject a rider_id/contact/report-reason made up of only invisible Unicode characters, not just whitespace
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the

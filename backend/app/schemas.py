@@ -65,12 +65,43 @@ def _reject_nul(value: str) -> str:
     return value
 
 
-# A string that must have real, non-whitespace content, and must not carry
-# a NUL byte Postgres can't store -- not just a non-empty one. See
-# _reject_blank's and _reject_nul's own docstrings for why
-# Field(min_length=1) alone isn't enough here.
+# No ceiling on how long rider_id/contact/an abuse report's reason can be
+# -- Field(min_length=1) above puts a floor on these fields but never a
+# top, and nothing else in the stack catches it either: app/models.py's
+# backing columns are a plain SQLAlchemy String (no length), which
+# Postgres happily stores as an unbounded VARCHAR. Confirmed this was
+# real, not theoretical, with a live TestClient call before this fix: POST
+# /requests with a 50,000-character rider_id and contact validated cleanly
+# and came back a real 201, and the GET /requests response right after
+# -- the open list every anonymous caller polls, no auth required
+# (SCOPE.md: open-join, no SMS/OTP) -- was itself 5MB+, just from that one
+# row. A single, ordinary-looking POST permanently bloats every future
+# caller's response to the public list for as long as that request stays
+# open (indefinitely for a recurring one -- docs/MATCHING_ALGORITHM.md's
+# "Request lifecycle" section), the same "one reachable POST degrades
+# everyone else" shape as the duplicate-weekday and datetime-range fixes
+# already in TASKS.md's own log, just on string length instead of list
+# length or a datetime bound.
+#
+# SCOPE.md never states a number for this, the same situation
+# app/retention.py's RETENTION_DAYS is already in -- so this is my own
+# reasonable default (room for a real name, a phone number or WhatsApp
+# handle, or a genuinely detailed abuse-report paragraph, several times
+# over), not a hard system limit the way MAX_SEATS_NEEDED above is. Worth
+# revisiting if a real policy is ever set.
+MAX_TEXT_FIELD_LENGTH = 500
+
+# A string that must have real, non-whitespace content, must not carry a
+# NUL byte Postgres can't store, and must not run past
+# MAX_TEXT_FIELD_LENGTH -- not just a non-empty one. See _reject_blank's
+# and _reject_nul's own docstrings for why Field(min_length=1) alone isn't
+# enough here, and MAX_TEXT_FIELD_LENGTH's own comment just above for why
+# a ceiling is needed too.
 NonBlankStr = Annotated[
-    str, Field(min_length=1), AfterValidator(_reject_blank), AfterValidator(_reject_nul)
+    str,
+    Field(min_length=1, max_length=MAX_TEXT_FIELD_LENGTH),
+    AfterValidator(_reject_blank),
+    AfterValidator(_reject_nul),
 ]
 
 # app/models.py's seats_needed column is a plain Postgres INTEGER (4

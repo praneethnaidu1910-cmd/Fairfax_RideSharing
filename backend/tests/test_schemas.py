@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from app.sample_data import SAMPLE_REQUESTS
 from app.schemas import (
+    MAX_TEXT_FIELD_LENGTH,
     Location,
     OneOffSchedule,
     RecurringSchedule,
@@ -343,6 +344,28 @@ def test_ride_request_create_rejects_a_nul_character_in_rider_id_or_contact(fiel
     # not a 422 from intake.
     with pytest.raises(ValidationError):
         RideRequestCreate(**_create_payload(**{field: "a\x00b"}))
+
+
+@pytest.mark.parametrize("field", ["rider_id", "contact"])
+def test_ride_request_create_rejects_a_rider_id_or_contact_past_the_length_ceiling(field):
+    # Field(min_length=1) put a floor on rider_id/contact but never a
+    # ceiling -- app/models.py's backing columns are a plain SQLAlchemy
+    # String (no length), so Postgres stores whatever comes in without
+    # complaint. Confirmed this was real, not theoretical, with a live
+    # TestClient call before this fix: POST /requests with a
+    # 50,000-character rider_id and contact validated cleanly and came
+    # back a real 201, and the following GET /requests response -- the
+    # open list every anonymous caller polls -- was itself 5MB+.
+    with pytest.raises(ValidationError):
+        RideRequestCreate(**_create_payload(**{field: "a" * (MAX_TEXT_FIELD_LENGTH + 1)}))
+
+
+@pytest.mark.parametrize("field", ["rider_id", "contact"])
+def test_ride_request_create_keeps_a_rider_id_or_contact_exactly_at_the_length_ceiling(field):
+    # The fix above must not reject a real value that merely reaches the
+    # ceiling -- only one that runs past it.
+    req = RideRequestCreate(**_create_payload(**{field: "a" * MAX_TEXT_FIELD_LENGTH}))
+    assert len(getattr(req, field)) == MAX_TEXT_FIELD_LENGTH
 
 
 def test_ride_request_create_rejects_seats_needed_beyond_postgres_integer_range():

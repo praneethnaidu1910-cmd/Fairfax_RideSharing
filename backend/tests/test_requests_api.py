@@ -250,6 +250,26 @@ def test_create_request_rejects_a_nul_character_in_rider_id_or_contact():
     assert response.status_code == 422
 
 
+def test_create_request_rejects_a_rider_id_or_contact_past_the_length_ceiling():
+    # Field(min_length=1) put a floor on rider_id/contact but never a
+    # ceiling, and app/models.py's backing columns are a plain SQLAlchemy
+    # String (no length) -- nothing anywhere stopped either field from
+    # growing arbitrarily large. Confirmed this was real, not theoretical,
+    # with a live TestClient call before this fix: this exact payload
+    # (a 50,000-character rider_id and contact) returned a real 201, and
+    # the following GET /requests -- the open list every anonymous caller
+    # polls, no auth required (SCOPE.md: open-join, no SMS/OTP) -- came
+    # back as a 5MB+ response, just from that one row.
+    payload = _one_off_payload(
+        "A" * 50_000, FAIRFAX, ALDIE, 120, 30, contact="B" * 50_000
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/requests", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_create_request_rejects_seats_needed_beyond_postgres_integer_range():
     # app/models.py's seats_needed column is a plain Postgres INTEGER (4
     # bytes) -- Field(ge=1) on RideRequestCreate/RideRequest put a floor

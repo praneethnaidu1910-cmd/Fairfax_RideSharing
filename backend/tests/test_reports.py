@@ -145,6 +145,26 @@ def test_post_report_with_a_reason_made_only_of_invisible_characters_is_rejected
     assert _row_count(make_session_factory(), created["id"]) == 0
 
 
+def test_post_report_with_a_reason_past_the_length_ceiling_is_rejected():
+    # Same gap as app/schemas.py's RideRequestCreate fields (rider_id/
+    # contact) -- Field(min_length=1) put a floor on `reason` but never a
+    # ceiling, and this table's own `reason` column (app/models.py) is a
+    # plain SQLAlchemy String (no length) that would have stored whatever
+    # came in without complaint. Confirmed real before this fix: this
+    # exact 50,000-character reason validated cleanly and was durably
+    # stored by a real 201.
+    payload = _one_off_payload("rider-report-long-reason", contact="555-0608")
+
+    with TestClient(app) as client:
+        created = client.post("/requests", json=payload).json()
+        response = client.post(
+            f"/requests/{created['id']}/report", json={"reason": "x" * 50_000}
+        )
+
+    assert response.status_code == 422
+    assert _row_count(make_session_factory(), created["id"]) == 0
+
+
 def test_post_report_with_a_nul_character_in_reason_is_rejected():
     # Same gap as app/schemas.py's RideRequestCreate fields (rider_id/
     # contact): a NUL byte is neither empty nor whitespace, so it passed
