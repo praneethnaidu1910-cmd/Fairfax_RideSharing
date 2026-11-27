@@ -37,14 +37,37 @@ def new_request_form(request: Request):
 @router.post("/new")
 async def submit_new_request(
     request: Request,
-    rider_id: str = Form(...),
-    origin_place: str = Form(...),
+    # rider_id/origin_place/destination_place/schedule_type/contact used to
+    # be typed `str = Form(...)` -- a *required* Form field -- which meant
+    # FastAPI 422'd on a request that left one of them out entirely before
+    # this function (and its own try/except below) ever ran at all. That's
+    # the exact same inconsistent-error-path shape as weekdays/seats_needed's
+    # own fix just below, just triggered by a field being *missing*
+    # altogether instead of present-but-malformed: a non-browser client (or
+    # a browser form mangled by a disabled/missing input) that leaves out,
+    # say, `contact` got FastAPI's bare `{"detail":[{"type":"missing",...}]}`
+    # JSON body, not this endpoint's own "Couldn't post that request: ..."
+    # HTML re-render every other bad value on this exact form already gets.
+    # Confirmed real, not theoretical, with a live TestClient call before
+    # this fix: POST /new with `rider_id` left out of the form body entirely
+    # 422'd with that raw JSON, not the form page. Taking each in as an
+    # ordinary, always-present string (empty when omitted) routes a missing
+    # value through this function's own validation instead -- NonBlankStr
+    # already rejects an empty rider_id/contact inside the try block below,
+    # and an empty origin_place/destination_place still correctly hits the
+    # existing "could not resolve" checks just beneath it, since real
+    # geocoded coordinates can never have been filled in for a place name
+    # that was never typed. An empty schedule_type falls through to the same
+    # "treat anything that isn't literally 'recurring' as one-off" branch
+    # this already used for any other unrecognized value.
+    rider_id: str = Form(""),
+    origin_place: str = Form(""),
     origin_lat: Optional[str] = Form(None),
     origin_lng: Optional[str] = Form(None),
-    destination_place: str = Form(...),
+    destination_place: str = Form(""),
     destination_lat: Optional[str] = Form(None),
     destination_lng: Optional[str] = Form(None),
-    schedule_type: str = Form(...),
+    schedule_type: str = Form(""),
     earliest_departure: Optional[str] = Form(None),
     latest_departure: Optional[str] = Form(None),
     # Both of these used to be typed `list[int]`/`int` straight on the Form
@@ -69,7 +92,7 @@ async def submit_new_request(
     earliest_departure_time: Optional[str] = Form(None),
     latest_departure_time: Optional[str] = Form(None),
     seats_needed: str = Form("1"),
-    contact: str = Form(...),
+    contact: str = Form(""),
 ):
     # Re-render with whatever the rider typed on any failure below, so a
     # mistake doesn't mean starting the form over from scratch.

@@ -216,3 +216,99 @@ def test_recurring_form_recheck_shows_the_right_weekday_boxes_after_an_unrelated
     assert response.status_code == 400
     checked_values = re.findall(r'value="(\d)"\s*checked', response.text)
     assert checked_values == ["1", "3"]
+
+
+def test_missing_rider_id_field_entirely_reprompts_form_instead_of_a_raw_422():
+    # rider_id/origin_place/destination_place/schedule_type/contact used to
+    # be typed `str = Form(...)` -- a *required* Form field -- which meant
+    # FastAPI 422'd with its own raw JSON body before submit_new_request()
+    # (and its own try/except below) ever ran, the same inconsistent-error-
+    # path shape as seats_needed/weekdays' own fix above, just for a field
+    # left out of the request entirely instead of present-but-malformed.
+    # Confirmed real, not theoretical, before this fix: leaving rider_id out
+    # of the form body altogether returned a bare
+    # `{"detail":[{"type":"missing",...}]}` JSON body, not this form's own
+    # "Couldn't post that request: ..." page.
+    form_data = _one_off_form("unused-rider-id")
+    del form_data["rider_id"]
+
+    with TestClient(app) as client:
+        response = client.post("/new", data=form_data, follow_redirects=False)
+        browse_response = client.get("/browse")
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Couldn" in response.text and "post that request" in response.text
+    assert "unused-rider-id" not in browse_response.text
+
+
+def test_missing_contact_field_entirely_reprompts_form_instead_of_a_raw_422():
+    # Same fix as rider_id above, on `contact` instead.
+    form_data = _one_off_form("contact-missing-rider")
+    del form_data["contact"]
+
+    with TestClient(app) as client:
+        response = client.post("/new", data=form_data, follow_redirects=False)
+        browse_response = client.get("/browse")
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Couldn" in response.text and "post that request" in response.text
+    assert "contact-missing-rider" not in browse_response.text
+
+
+def test_missing_origin_place_field_entirely_reprompts_form_instead_of_a_raw_422():
+    # Same fix as rider_id above, on `origin_place` instead -- a missing
+    # place name also leaves origin_lat/origin_lng unset for any real
+    # client (they're only ever filled in by app.js's own geocode lookup
+    # against this exact field), so this lands on the existing "could not
+    # resolve" check rather than crashing on the missing field itself.
+    form_data = _one_off_form("origin-place-missing-rider")
+    del form_data["origin_place"]
+    form_data["origin_lat"] = ""
+    form_data["origin_lng"] = ""
+
+    with TestClient(app) as client:
+        response = client.post("/new", data=form_data, follow_redirects=False)
+        browse_response = client.get("/browse")
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Could not resolve pickup place" in response.text
+    assert "origin-place-missing-rider" not in browse_response.text
+
+
+def test_missing_destination_place_field_entirely_reprompts_form_instead_of_a_raw_422():
+    # Same fix as rider_id above, on `destination_place` instead.
+    form_data = _one_off_form("destination-place-missing-rider")
+    del form_data["destination_place"]
+    form_data["destination_lat"] = ""
+    form_data["destination_lng"] = ""
+
+    with TestClient(app) as client:
+        response = client.post("/new", data=form_data, follow_redirects=False)
+        browse_response = client.get("/browse")
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Could not resolve destination place" in response.text
+    assert "destination-place-missing-rider" not in browse_response.text
+
+
+def test_missing_schedule_type_field_entirely_still_posts_as_one_off():
+    # Same fix as rider_id above, on `schedule_type` instead -- but unlike
+    # the other four fields, a missing schedule_type isn't itself a reason
+    # to reject the request: this endpoint already treats any value that
+    # isn't literally "recurring" as one-off, so a missing one falls
+    # through to that exact same existing branch rather than needing its
+    # own new error case.
+    form_data = _one_off_form("schedule-type-missing-rider")
+    del form_data["schedule_type"]
+
+    with TestClient(app) as client:
+        response = client.post("/new", data=form_data, follow_redirects=False)
+        assert response.status_code == 303
+
+        browse_response = client.get("/browse")
+
+    assert "schedule-type-missing-rider" in browse_response.text

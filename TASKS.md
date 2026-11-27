@@ -61,6 +61,59 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 60. Stop a missing (not just malformed) `/new` form field from 422ing with raw JSON instead of this form's own error page
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this evening run went looking for a real bug the
+  same way the last several runs did, and found the sibling of task 46's own
+  fix in `app/web.py`'s `submit_new_request()` -- same inconsistent-error-
+  path shape, just triggered by a field being left out of the request
+  entirely instead of present-but-malformed.
+- Task 46 fixed `seats_needed`/`weekdays` 422ing with FastAPI's own raw JSON
+  body instead of this endpoint's "Couldn't post that request: ..." HTML
+  re-render, when either was *present but not parseable as a number*. But
+  `rider_id`, `origin_place`, `destination_place`, `schedule_type`, and
+  `contact` were still typed `str = Form(...)` -- a *required* Form field --
+  which means FastAPI 422s on its own, before `submit_new_request()` (and
+  its own try/except) ever runs at all, the moment one of them is left out
+  of the request altogether rather than sent with a bad value. A real
+  browser's own `<form>` always sends every one of these fields (even
+  empty), so this is specifically a non-browser-client gap -- but that's
+  exactly task 46's own framing too ("a rider mistyping the seats field, or
+  any non-browser client"), and nothing about SCOPE.md's open-join, no-auth
+  model stops a non-browser client from posting here. Confirmed this was
+  real, not theoretical, with a live TestClient call before this fix: `POST
+  /new` with `rider_id` left out of the form body entirely (every other
+  field present and valid) returned a bare
+  `{"detail":[{"type":"missing","loc":["body","rider_id"],...}]}` JSON
+  body, not the form page -- and the same thing happened for
+  `origin_place`, `destination_place`, `schedule_type`, and `contact`.
+- Fix: all five now take the same `Form("")` (always-present, possibly-
+  empty string) typing `weekdays`/`seats_needed` already got from task 46,
+  instead of a required `Form(...)`. A missing `rider_id`/`contact` now
+  reaches the existing `RideRequestCreate` construction inside the try
+  block exactly like an explicitly-blank one already did, where
+  `NonBlankStr` already rejects it with the same friendly error. A missing
+  `origin_place`/`destination_place` still correctly hits the existing
+  "could not resolve pickup/destination place" check just above the try
+  block, since a real client can never have gotten `origin_lat`/`origin_lng`
+  filled in (those only come from `app.js`'s own geocode lookup keyed off
+  that exact field) without the place name having been typed first. A
+  missing `schedule_type` fall through to the same "anything that isn't
+  literally 'recurring' is one-off" branch this endpoint already used for
+  any other unrecognized value -- not a new rule, since nothing about a
+  missing field is any less "not recurring" than an invalid one.
+- Tests: `tests/test_web_frontend.py` adds
+  `test_missing_rider_id_field_entirely_reprompts_form_instead_of_a_raw_422`,
+  `test_missing_contact_field_entirely_reprompts_form_instead_of_a_raw_422`,
+  `test_missing_origin_place_field_entirely_reprompts_form_instead_of_a_raw_422`,
+  `test_missing_destination_place_field_entirely_reprompts_form_instead_of_a_raw_422`
+  (the real reproductions above, through the actual `POST /new` route), and
+  `test_missing_schedule_type_field_entirely_still_posts_as_one_off` (the
+  one case that should still succeed, not error). Ran all five against the
+  pre-fix code first (temporarily stashing just `app/web.py`) to confirm
+  they actually fail there -- a real `422` instead of `400`/`303`, not just
+  that they pass now. Full suite: 236 tests, up from 231, all green.
+
 ### 59. Cap rider_id/contact/report-reason length so one POST can't bloat every future GET /requests response
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this morning run went looking for a real bug the
