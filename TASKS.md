@@ -61,6 +61,80 @@ that works" to "something a real person can actually open and use."
 
 ## Done
 
+### 61. Stop /new from silently submitting a stale, mismatched pickup/destination location
+- Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
+  both are manual-only, so this morning run went looking for a real bug the
+  same way the last several runs did. I read through the whole backend
+  (every module under `app/`, 99% line coverage already per `coverage run`)
+  without finding anything new there, so I widened the search to the one
+  thing that really can't be exercised by `pytest` at all: the actual
+  browser-side JS in `app/static/app.js`. Found the same shape of bug the
+  root README already describes finding once before in this exact file
+  (task #12's own verification: "app/static/app.js was treating any failed
+  /geocode call... the same as a confirmed 404") -- same file, same
+  function, a different gap in it.
+- `geocodeField()` only ever runs on a field's `blur` event, and only ever
+  updates the hidden `origin_lat`/`origin_lng` (or destination) fields once
+  the async `/geocode` fetch it kicks off actually resolves. Nothing ever
+  checks, at the moment the form is actually submitted, whether whatever
+  lat/lng is currently sitting in those hidden fields still corresponds to
+  whatever place name is currently typed in the visible text field next to
+  them. That's a real gap, not a theoretical one, in two different ways:
+  pressing Enter inside a still-focused place field submits the form
+  directly, without firing `blur` on that field at all, and even an
+  ordinary blur (tabbing away, clicking elsewhere) only *starts* the async
+  fetch -- the synchronous native form submission that follows a click or
+  Enter doesn't wait for it. Either way, if a rider resolves "Fairfax",
+  then edits the field to "Reston" and submits before a fresh lookup for
+  "Reston" ever runs (or ever finishes), the form posts Fairfax's
+  coordinates under a request that reads "Reston" everywhere a human looks
+  at it -- the wrong pickup/dropoff location, accepted silently, with
+  `POST /requests` returning a real `201` and nothing telling the rider
+  anything went wrong. For an app whose whole point is coordinating real
+  physical pickups (SCOPE.md), that's a much worse failure than the
+  404/transient-failure cases this same function already guards against.
+  Confirmed this was real, not theoretical, with a live headless-Chromium
+  (Playwright) script against a running server -- the same tool and the
+  same kind of verification the root README's own task #12 section already
+  describes using for exactly this file, since there's no browser in this
+  project's automated test sandbox and no JS test runner wired into this
+  repo at all (`pytest` only exercises the backend): resolved
+  `origin_place` to "Fairfax" (hidden lat/lng correctly set to
+  38.8462/-77.3064), edited the field to "Reston" without blurring, then
+  pressed Enter directly in that same field -- the form submitted
+  immediately, landed on `/mine/<id>` (a real, successful `POST
+  /requests`), and the row that actually got stored in Postgres still held
+  Fairfax's coordinates, not Reston's.
+- Fix: every geocode-tracked field now remembers which exact place string
+  its current lat/lng actually came from
+  (`input.dataset.resolvedFor`, set on a successful lookup, cleared
+  whenever the lat/lng themselves get cleared -- a 404, or the field going
+  blank). The form's own `submit` event listener (new) intercepts every
+  attempt to submit -- a click, Enter, anything -- and for any
+  geocode-tracked field whose current text doesn't match that remembered
+  value (edited since the last resolution, or never resolved at all),
+  `await`s a fresh `geocodeField()` call before letting the submission
+  through for real (`form.submit()`, which deliberately bypasses the
+  `submit` event itself so this doesn't re-enter). The common,
+  already-correctly-resolved-and-unedited case matches immediately and
+  costs nothing extra -- confirmed with a live script that an ordinary
+  resolve-then-submit flow still completes in well under 100ms, no added
+  round trip. Re-ran the original Enter-key reproduction above against the
+  fixed code and confirmed the stored row now holds Reston's coordinates,
+  not Fairfax's; separately confirmed the existing "place never resolves"
+  flow (a real 404 from `/geocode`) still correctly re-renders this form's
+  own "Could not resolve pickup place..." error instead of either silently
+  submitting or behaving any differently than before.
+- No backend change -- `app/router.py`'s `create_request()` and
+  `app/web.py`'s `submit_new_request()` already do the right thing with
+  whatever lat/lng they're handed; the gap was entirely in the client never
+  guaranteeing that what it handed them still matched what the rider typed.
+  Full backend suite (`pytest`, 236 tests) reruns clean, unchanged by this
+  fix, since nothing here touches `app/*.py` -- this is a pure
+  `app/static/app.js` change, verified the way the root README's own task
+  #12 section already establishes as this repo's way of checking
+  frontend-only behavior no backend test can reach.
+
 ### 60. Stop a missing (not just malformed) `/new` form field from 422ing with raw JSON instead of this form's own error page
 - Not a numbered "Up next" item -- "Up next" only has tasks 13/19 on it and
   both are manual-only, so this evening run went looking for a real bug the
